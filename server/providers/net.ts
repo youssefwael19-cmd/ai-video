@@ -1,0 +1,94 @@
+import { writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { config } from '../config.js';
+import { ProviderError } from './types.js';
+
+/**
+ * Some free providers (Novita, Magic Hour) require a publicly
+ * reachable https URL instead of a multipart upload. We publish the photo to a
+ * free, no-account host and cache the resulting URL per job.
+ */
+const cache = new Map<string, Promise<string>>();
+
+export function getPublicImageUrl(localPath: string): Promise<string> {
+  if (config.publicImageUrlOverride) {
+    const cached = cache.get(localPath);
+    if (cached) return cached;
+    const url = Promise.resolve(
+      `${config.publicImageUrlOverride.replace(/\/$/, '')}/${path.basename(localPath)}`,
+    );
+    cache.set(localPath, url);
+    return url;
+  }
+
+  const cached = cache.get(localPath);
+  if (cached) return cached;
+
+  const task = publish(localPath).catch((err) => {
+    cache.delete(localPath);
+    throw err;
+  });
+  cache.set(localPath, task);
+  return task;
+}
+
+async function publish(localPath: string): Promise<string> {
+  const bytes = await import('node:fs/promises').then((fs) => fs.readFile(localPath));
+  const errors: string[] = [];
+
+  for (const host of [catbox, tmpfiles]) {
+    try {
+      const url = await host(bytes, path.basename(localPath));
+      if (url) return url;
+    } catch (err) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  throw new ProviderError(`Could not publish the product photo to a public URL (${errors.join('; ')})`, {
+    retryable: true,
+  });
+}
+
+async function catbox(bytes: Buffer, name: string): Promise<string | null> {
+  const form = new FormData();
+  form.append('reqtype', 'fileupload');
+  form.append('fileToUpload', new Blob([new Uint8Array(bytes)]), name);
+  const res = await fetch('https://catbox.moe/user/api.php', {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(45_000),
+  });
+  const text = (await res.text()).trim();
+  if (res.ok && /^https?:\/\//.test(text)) return text;
+  throw new Error(`catbox ${res.status}: ${text.slice(0, 100)}`);
+}
+
+async function tmpfiles(bytes: Buffer, name: string): Promise<string | null> {
+  const form = new FormData();
+  form.append('file', new Blob([new Uint8Array(bytes)]), name);
+  const res = await fetch('https://tmpfiles.org/api/v1/upload', {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(45_000),
+  });
+  const json = (await res.json()) as { data?: { url?: string } };
+  const url = json.data?.url;
+  if (res.ok && url) return url.replace('tmpfiles.org/', 'tmpfiles.org/dl/');
+  throw new Error(`tmpfiles ${res.status}`);
+}
+
+/** Small helper for adapters that need to persist a remote mp4 locally. */
+export async function downloadToFile(url: string, dest: string, signal?: AbortSignal): Promise<string> {
+  const res = await fetch(url, { signal: signal ?? AbortSignal.timeout(180_000) });
+  if (!res.ok) {
+    throw new ProviderError(`Downloading the generated clip failed (HTTP ${res.status})`, {
+      status: res.status,
+      retryable: res.status >= 500 || res.status === 429,
+    });
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.byteLength < 2048) throw new ProviderError('Provider returned an empty video file');
+  await writeFile(dest, buf);
+  return dest;
+}
