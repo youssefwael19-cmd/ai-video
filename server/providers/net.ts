@@ -78,6 +78,28 @@ async function tmpfiles(bytes: Buffer, name: string): Promise<string | null> {
   throw new Error(`tmpfiles ${res.status}`);
 }
 
+/**
+ * Bound one request by both a per-request timeout and the caller's cancellation
+ * signal. The gateway aborts a beat after 9 minutes; without this the fetch
+ * kept running to completion in the background after the beat was given up on.
+ */
+export function withDeadline(signal: AbortSignal, ms: number): AbortSignal {
+  if (signal.aborted) return signal;
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal.reason);
+  signal.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(() => controller.abort(new Error('request deadline exceeded')), ms);
+  controller.signal.addEventListener(
+    'abort',
+    () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', abort);
+    },
+    { once: true },
+  );
+  return controller.signal;
+}
+
 /** Small helper for adapters that need to persist a remote mp4 locally. */
 export async function downloadToFile(url: string, dest: string, signal?: AbortSignal): Promise<string> {
   const res = await fetch(url, { signal: signal ?? AbortSignal.timeout(180_000) });

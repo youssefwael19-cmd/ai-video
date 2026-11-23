@@ -378,7 +378,10 @@ export default function App() {
 
       <footer className="footer">
         <span className="mono">motion/studio</span>
-        <span>Free-tier providers: Hugging Face Spaces · Novita AI · Magic Hour</span>
+        <span>
+          Free-tier providers: Hugging Face Spaces · Novita AI · Magic Hour · Replicate · Agnes AI ·
+          Atmee
+        </span>
       </footer>
     </div>
   );

@@ -15,6 +15,9 @@ export const config = {
     huggingFace: (process.env.HUGGING_FACE_TOKEN ?? '').trim(),
     novita: (process.env.NOVITA_API_KEY ?? '').trim(),
     magicHour: (process.env.MAGIC_HOUR_API_KEY ?? '').trim(),
+    replicate: (process.env.REPLICATE_API_TOKEN ?? '').trim(),
+    agnes: (process.env.AGNES_API_KEY ?? '').trim(),
+    atmee: (process.env.ATMEE_API_KEY ?? '').trim(),
   },
 
   enableLocalFallback: (process.env.ENABLE_LOCAL_FALLBACK ?? 'true') !== 'false',

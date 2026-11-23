@@ -28,9 +28,9 @@ export interface Provider {
   id: string;
   label: string;
   /** Which free service backs this provider. */
-  service: 'Hugging Face Spaces' | 'Novita AI' | 'Magic Hour';
+  service: 'Hugging Face Spaces' | 'Novita AI' | 'Magic Hour' | 'Replicate' | 'Agnes AI' | 'Atmee';
   model: string;
-  /** True when the credentials this provider needs are present. */
+  /** True when the provider is ready to call (true for providers needing no key). */
   isConfigured: () => boolean;
   /** What the provider needs, shown in the UI when it is not configured. */
   requires: { env: string; signupUrl: string; note: string };

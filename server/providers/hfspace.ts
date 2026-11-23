@@ -6,9 +6,14 @@ import { downloadToFile } from './net.js';
 import { ProviderError, type MotionRequest, type Provider, type ProviderOutput } from './types.js';
 
 /**
- * Hugging Face Spaces all bill against the same free ZeroGPU quota attached to
- * one account, so the four image-to-video Spaces are exposed as a SINGLE
- * provider in the pool (one slot, one quota, one cooldown). Inside that
+ * Hugging Face Spaces needs no key at all: ZeroGPU Spaces are free for
+ * anonymous callers (a small daily GPU quota), so the pool has a working
+ * provider with zero setup. A token is still honoured when present, and then
+ * the runs draw on that account's own, larger daily quota.
+ *
+ * All four Spaces share whatever free ZeroGPU quota applies to the caller, so
+ * they are exposed as a SINGLE provider in the pool (one slot, one quota, one
+ * cooldown). Inside that
  * provider we still rotate across the Spaces: a Space that is asleep, queued,
  * out of GPU time or broken hands the beat to the next one without spending
  * another provider slot or claiming another free quota.
@@ -142,10 +147,21 @@ export function hfSpaceHealth(): { space: string; cooldownSeconds: number; lastE
   }));
 }
 
+/** Explain a 401/403 only when we had no token to send in the first place. */
+function authNote(status: number, token: string): string {
+  if (token) return '';
+  return status === 401 || status === 403
+    ? ' — this Space wants a Hugging Face token (set HUGGING_FACE_TOKEN)'
+    : '';
+}
+
 function subdomain(space: string): string {
   return space.toLowerCase().replace(/\//g, '-').replace(/[._]/g, '-') + '.hf.space';
 }
 
+/**
+ * `hfToken` is optional: pass '' and the Spaces are still called, anonymously.
+ */
 export function createHuggingFaceProviders(
   hfToken: string,
   fileNames: { next: () => string },
@@ -160,9 +176,11 @@ export function createHuggingFaceProviders(
       requires: {
         env: 'HUGGING_FACE_TOKEN',
         signupUrl: 'https://huggingface.co/settings/tokens',
-        note: 'Free account + one shared ZeroGPU quota',
+        note: 'No key needed — anonymous runs get a small daily GPU quota',
       },
-      isConfigured: () => hfToken.length > 0,
+      // Zero setup: the Spaces answer anonymous callers, so this provider is
+      // always in the pool rather than waiting for a token.
+      isConfigured: () => true,
       generate: (req, signal) => runPool(hfToken, req, signal, fileNames),
     },
   ];
@@ -225,13 +243,13 @@ async function runSpace(
 ): Promise<ProviderOutput> {
   const host = subdomain(spec.space);
   const seconds = Math.min(spec.maxSeconds, req.seconds);
-  // Only the Authorization header: Hugging Face's proxy injects the ZeroGPU
-  // quota identity token (x-ip-token) itself. Supplying our own token as
-  // x-ip-token makes ZeroGPU reject the call immediately with an empty error
-  // (verified against the live Spaces: Authorization alone returns a video).
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${hfToken}`,
-  };
+  // With no token we send no auth header at all, which is how the Spaces are
+  // called anonymously. With a token, Authorization is the only header we set:
+  // Hugging Face's proxy injects the ZeroGPU quota identity token (x-ip-token)
+  // itself, and supplying our own as x-ip-token makes ZeroGPU reject the call
+  // immediately with an empty error (verified against the live Spaces:
+  // Authorization alone returns a video).
+  const headers: Record<string, string> = hfToken ? { Authorization: `Bearer ${hfToken}` } : {};
 
   // 1. Upload the photo into the Space's own filesystem.
   const form = new FormData();
@@ -247,11 +265,14 @@ async function runSpace(
     signal: AbortSignal.timeout(120_000),
   });
   if (!uploadRes.ok) {
-    throw new ProviderError(`Space upload failed (HTTP ${uploadRes.status})`, {
-      status: uploadRes.status,
-      retryable: uploadRes.status >= 500 || uploadRes.status === 429,
-      raw: (await uploadRes.text().catch(() => '')).slice(0, 200),
-    });
+    throw new ProviderError(
+      `Space upload failed (HTTP ${uploadRes.status})${authNote(uploadRes.status, hfToken)}`,
+      {
+        status: uploadRes.status,
+        retryable: uploadRes.status >= 500 || uploadRes.status === 429,
+        raw: (await uploadRes.text().catch(() => '')).slice(0, 200),
+      },
+    );
   }
   const uploaded = (await uploadRes.json()) as string[];
   if (!Array.isArray(uploaded) || !uploaded[0]) throw new ProviderError('Space did not return an upload path');
@@ -266,7 +287,7 @@ async function runSpace(
   });
   if (!callRes.ok) {
     const body = await callRes.text().catch(() => '');
-    throw new ProviderError(`Space rejected the job (HTTP ${callRes.status})`, {
+    throw new ProviderError(`Space rejected the job (HTTP ${callRes.status})${authNote(callRes.status, hfToken)}`, {
       status: callRes.status,
       retryable: true,
       raw: body.slice(0, 300),
@@ -287,7 +308,10 @@ async function runSpace(
     });
   }
 
-  const payload = await readSse(streamRes.body);
+  const payload = await readSse(
+    streamRes.body,
+    hfToken ? '' : ' (anonymous — shared daily GPU quota; add HUGGING_FACE_TOKEN for your own)',
+  );
   const remote = findVideoPath(payload);
   if (!remote) {
     throw new ProviderError('Space finished without returning a video', {
@@ -303,7 +327,7 @@ async function runSpace(
   return { videoPath: dest };
 }
 
-async function readSse(body: ReadableStream<Uint8Array>): Promise<unknown> {
+async function readSse(body: ReadableStream<Uint8Array>, tokenNote = ''): Promise<unknown> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -337,7 +361,7 @@ async function readSse(body: ReadableStream<Uint8Array>): Promise<unknown> {
         // guessing at a payload problem.
         throw new ProviderError(
           text === 'null'
-            ? 'Space refused the run without a message (GPU quota or queue policy)'
+            ? `Space refused the run without a message (GPU quota or queue policy)${tokenNote}`
             : `Space returned an error: ${text.slice(0, 160)}`,
           { retryable: true, raw: text.slice(0, 200) },
         );
