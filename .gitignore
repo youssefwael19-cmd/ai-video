@@ -11,3 +11,4 @@ data
 .productecho/
 .productecho-key
 *.zip
+.github-token
