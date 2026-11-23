@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { config } from '../config.js';
-import { downloadToFile, withDeadline } from './net.js';
+import { downloadToFile, sleep, withDeadline } from './net.js';
 import { ProviderError, type MotionRequest, type Provider } from './types.js';
 
 /**
@@ -159,17 +159,3 @@ function errorText(error: { message?: string } | string | null | undefined): str
   return typeof error === 'string' ? error : (error.message ?? '');
 }
 
-function sleep(ms: number, signal: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    if (signal.aborted) return reject(new ProviderError('Cancelled', { retryable: false }));
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(new ProviderError('Cancelled', { retryable: false }));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}

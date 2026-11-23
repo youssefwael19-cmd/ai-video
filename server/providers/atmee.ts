@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
-import { downloadToFile, withDeadline } from './net.js';
+import { downloadToFile, sleep, withDeadline } from './net.js';
 import { ProviderError, type MotionRequest, type Provider } from './types.js';
 
 /**
@@ -131,17 +131,3 @@ function cell(code: string, message?: string): string {
   return message ? `${code}: ${message}` : code;
 }
 
-function sleep(ms: number, signal: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    if (signal.aborted) return reject(new ProviderError('Cancelled', { retryable: false }));
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(new ProviderError('Cancelled', { retryable: false }));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}

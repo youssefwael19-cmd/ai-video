@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { config } from '../config.js';
-import { downloadToFile } from './net.js';
+import { downloadToFile, sleep } from './net.js';
 import { ProviderError, type MotionRequest, type Provider } from './types.js';
 
 /** Magic Hour free-tier credits; LTX on the free tier is limited to 5s @ 480p. */
@@ -79,7 +79,7 @@ async function run(apiKey: string, req: MotionRequest, signal: AbortSignal) {
 
   const deadline = Date.now() + 9 * 60_000;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 4000));
+    await sleep(4000, signal);
     // Results live on the video-projects resource: /v1/image-to-video/{id} is a 404.
     const res = await fetch(`https://api.magichour.ai/v1/video-projects/${encodeURIComponent(id)}`, {
       headers: { Authorization: `Bearer ${apiKey}`, accept: 'application/json' },

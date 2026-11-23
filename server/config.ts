@@ -3,14 +3,21 @@ import path from 'node:path';
 
 const root = process.cwd();
 
+/**
+ * DATA_DIR points at a mounted volume on hosts whose own disk is wiped on every
+ * restart, so finished renders and uploaded photos survive a redeploy.
+ */
+const dataDir = path.resolve(process.env.DATA_DIR?.trim() || path.join(root, 'data'));
+
 export const config = {
   port: Number(process.env.PORT ?? 3000),
   root,
-  dataDir: path.join(root, 'data'),
-  uploadDir: path.join(root, 'data', 'uploads'),
-  segmentDir: path.join(root, 'data', 'segments'),
-  renderDir: path.join(root, 'data', 'renders'),
+  dataDir,
+  uploadDir: path.join(dataDir, 'uploads'),
+  segmentDir: path.join(dataDir, 'segments'),
+  renderDir: path.join(dataDir, 'renders'),
 
+  /** Empty strings mean the provider is simply not configured. */
   keys: {
     huggingFace: (process.env.HUGGING_FACE_TOKEN ?? '').trim(),
     novita: (process.env.NOVITA_API_KEY ?? '').trim(),
@@ -23,8 +30,3 @@ export const config = {
   enableLocalFallback: (process.env.ENABLE_LOCAL_FALLBACK ?? 'true') !== 'false',
   publicImageUrlOverride: (process.env.PUBLIC_IMAGE_URL_OVERRIDE ?? '').trim(),
 };
-
-/** A provider is "available" when its key is present. */
-export function hasKey(name: keyof typeof config.keys): boolean {
-  return config.keys[name].length > 0;
-}

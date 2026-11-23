@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { config } from '../config.js';
-import { downloadToFile } from './net.js';
+import { downloadToFile, sleep } from './net.js';
 import { ProviderError, type MotionRequest, type Provider } from './types.js';
 
 /** Novita AI free signup credits, asynchronous v3 task API. */
@@ -87,17 +87,3 @@ async function run(apiKey: string, req: MotionRequest, signal: AbortSignal) {
   throw new ProviderError('Novita generation timed out', { retryable: true });
 }
 
-function sleep(ms: number, signal: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    if (signal.aborted) return reject(new ProviderError('Cancelled', { retryable: false }));
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(new ProviderError('Cancelled', { retryable: false }));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-  });
-}

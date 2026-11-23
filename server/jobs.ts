@@ -137,7 +137,7 @@ async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
       };
 
       try {
-        const { output, provider, attempts } = await generateBeat(request, (attempt: Attempt) => {
+        const { output, provider } = await generateBeat(request, (attempt: Attempt) => {
           if (attempt.skipped) {
             log(job, `${beat.label} → ${attempt.label} skipped: ${attempt.error ?? 'cooling down'}`, 'info');
             return;
@@ -157,7 +157,6 @@ async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
         segment.model = provider.model;
         segment.durationSeconds = output.durationSeconds;
         clips[index] = output.videoPath;
-        void attempts;
       } catch (err) {
         segment.status = 'failed';
         segment.error = err instanceof Error ? err.message : String(err);

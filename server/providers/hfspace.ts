@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
-import { downloadToFile } from './net.js';
+import { downloadToFile, withDeadline } from './net.js';
 import { ProviderError, type MotionRequest, type Provider, type ProviderOutput } from './types.js';
 
 /**
@@ -13,10 +13,9 @@ import { ProviderError, type MotionRequest, type Provider, type ProviderOutput }
  *
  * All four Spaces share whatever free ZeroGPU quota applies to the caller, so
  * they are exposed as a SINGLE provider in the pool (one slot, one quota, one
- * cooldown). Inside that
- * provider we still rotate across the Spaces: a Space that is asleep, queued,
- * out of GPU time or broken hands the beat to the next one without spending
- * another provider slot or claiming another free quota.
+ * cooldown). Inside that provider we still rotate across the Spaces: a Space
+ * that is asleep, queued, out of GPU time or broken hands the beat to the next
+ * one without spending another provider slot or claiming another free quota.
  */
 
 interface SpaceSpec {
@@ -118,14 +117,27 @@ const SPACES: SpaceSpec[] = [
   },
 ];
 
+interface SpaceHealth {
+  failures: number;
+  cooldownUntil: number;
+  lastError?: string;
+}
+
 /**
  * Internal per-Space backoff only. This is deliberately not pool health: the
  * group holds a single gateway slot, so a Space-level failure must not put the
  * whole free Hugging Face quota (and its other three Spaces) into cooldown.
  */
-const spaceFailures = new Map<string, number>();
-const spaceCooldownUntil = new Map<string, number>();
-const spaceLastError = new Map<string, string>();
+const spaceHealth = new Map<string, SpaceHealth>();
+
+function healthOf(space: string): SpaceHealth {
+  let health = spaceHealth.get(space);
+  if (!health) {
+    health = { failures: 0, cooldownUntil: 0 };
+    spaceHealth.set(space, health);
+  }
+  return health;
+}
 
 function cooldownFor(consecutiveFailures: number): number {
   const seconds = Math.min(15 * 60, 45 * Math.pow(3, Math.max(0, consecutiveFailures - 1)));
@@ -133,18 +145,7 @@ function cooldownFor(consecutiveFailures: number): number {
 }
 
 export function resetHfSpaceHealth(): void {
-  spaceFailures.clear();
-  spaceCooldownUntil.clear();
-  spaceLastError.clear();
-}
-
-export function hfSpaceHealth(): { space: string; cooldownSeconds: number; lastError: string | null }[] {
-  const now = Date.now();
-  return SPACES.map((spec) => ({
-    space: spec.space,
-    cooldownSeconds: Math.max(0, Math.ceil(((spaceCooldownUntil.get(spec.space) ?? 0) - now) / 1000)),
-    lastError: spaceLastError.get(spec.space) ?? null,
-  }));
+  spaceHealth.clear();
 }
 
 /** Explain a 401/403 only when we had no token to send in the first place. */
@@ -162,10 +163,7 @@ function subdomain(space: string): string {
 /**
  * `hfToken` is optional: pass '' and the Spaces are still called, anonymously.
  */
-export function createHuggingFaceProviders(
-  hfToken: string,
-  fileNames: { next: () => string },
-): Provider[] {
+export function createHuggingFaceProviders(hfToken: string): Provider[] {
   return [
     {
       id: 'hf:spaces',
@@ -181,7 +179,7 @@ export function createHuggingFaceProviders(
       // Zero setup: the Spaces answer anonymous callers, so this provider is
       // always in the pool rather than waiting for a token.
       isConfigured: () => true,
-      generate: (req, signal) => runPool(hfToken, req, signal, fileNames),
+      generate: (req, signal) => runPool(hfToken, req, signal),
     },
   ];
 }
@@ -191,16 +189,15 @@ async function runPool(
   hfToken: string,
   req: MotionRequest,
   signal: AbortSignal,
-  fileNames: { next: () => string },
 ): Promise<ProviderOutput> {
   const now = Date.now();
   const ordered = [...SPACES].sort(
-    (a, b) => (spaceCooldownUntil.get(a.space) ?? 0) - (spaceCooldownUntil.get(b.space) ?? 0),
+    (a, b) => healthOf(a.space).cooldownUntil - healthOf(b.space).cooldownUntil,
   );
-  const ready = ordered.filter((spec) => (spaceCooldownUntil.get(spec.space) ?? 0) <= now);
+  const ready = ordered.filter((spec) => healthOf(spec.space).cooldownUntil <= now);
 
   if (ready.length === 0) {
-    const soonest = Math.min(...ordered.map((spec) => spaceCooldownUntil.get(spec.space) ?? now));
+    const soonest = Math.min(...ordered.map((spec) => healthOf(spec.space).cooldownUntil || now));
     const seconds = Math.max(1, Math.ceil((soonest - now) / 1000));
     throw new ProviderError(`All 4 Hugging Face Spaces are cooling down (next in ${seconds}s)`, {
       retryable: true,
@@ -211,10 +208,8 @@ async function runPool(
   const errors: string[] = [];
   for (const spec of ready) {
     try {
-      const output = await runSpace(spec, hfToken, req, signal, fileNames.next());
-      spaceFailures.delete(spec.space);
-      spaceCooldownUntil.delete(spec.space);
-      spaceLastError.delete(spec.space);
+      const output = await runSpace(spec, hfToken, req, signal);
+      spaceHealth.delete(spec.space);
       return output;
     } catch (err) {
       if (signal.aborted) throw err;
@@ -222,10 +217,10 @@ async function runPool(
       const raw = err instanceof ProviderError ? err.detail.raw : undefined;
       const detail = raw ? `${message} [${raw}]` : message;
       errors.push(`${spec.space}: ${detail}`);
-      spaceLastError.set(spec.space, detail.slice(0, 300));
-      const failures = (spaceFailures.get(spec.space) ?? 0) + 1;
-      spaceFailures.set(spec.space, failures);
-      spaceCooldownUntil.set(spec.space, cooldownFor(failures));
+      const health = healthOf(spec.space);
+      health.failures += 1;
+      health.lastError = detail.slice(0, 300);
+      health.cooldownUntil = cooldownFor(health.failures);
     }
   }
 
@@ -239,7 +234,6 @@ async function runSpace(
   hfToken: string,
   req: MotionRequest,
   signal: AbortSignal,
-  outName: string,
 ): Promise<ProviderOutput> {
   const host = subdomain(spec.space);
   const seconds = Math.min(spec.maxSeconds, req.seconds);
@@ -262,7 +256,7 @@ async function runSpace(
     method: 'POST',
     headers,
     body: form,
-    signal: AbortSignal.timeout(120_000),
+    signal: withDeadline(signal, 120_000),
   });
   if (!uploadRes.ok) {
     throw new ProviderError(
@@ -283,15 +277,14 @@ async function runSpace(
     method: 'POST',
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ data: inputs }),
-    signal: AbortSignal.timeout(120_000),
+    signal: withDeadline(signal, 120_000),
   });
   if (!callRes.ok) {
     const body = await callRes.text().catch(() => '');
-    throw new ProviderError(`Space rejected the job (HTTP ${callRes.status})${authNote(callRes.status, hfToken)}`, {
-      status: callRes.status,
-      retryable: true,
-      raw: body.slice(0, 300),
-    });
+    throw new ProviderError(
+      `Space rejected the job (HTTP ${callRes.status})${authNote(callRes.status, hfToken)}`,
+      { status: callRes.status, retryable: true, raw: body.slice(0, 300) },
+    );
   }
   const { event_id: eventId } = (await callRes.json()) as { event_id?: string };
   if (!eventId) throw new ProviderError('Space did not return a job id');
@@ -322,8 +315,8 @@ async function runSpace(
 
   // 4. Pull the clip into our workspace.
   const url = /^https?:\/\//.test(remote) ? remote : `https://${host}/gradio_api/file=${remote}`;
-  const dest = path.join(config.segmentDir, outName);
-  await downloadToFile(url, dest, AbortSignal.timeout(180_000));
+  const dest = path.join(config.segmentDir, `hf-${req.seed}-${Date.now()}-${randomUUID().slice(0, 6)}.mp4`);
+  await downloadToFile(url, dest, withDeadline(signal, 180_000));
   return { videoPath: dest };
 }
 
@@ -388,12 +381,8 @@ function findVideoPath(node: unknown, depth = 0): string | null {
     return null;
   }
   if (node && typeof node === 'object') {
-    const obj = node as Record<string, unknown>;
-    for (const key of ['video', 'path', 'url', 'name', 'value']) {
-      const hit = findVideoPath(obj[key], depth + 1);
-      if (hit) return hit;
-    }
-    for (const value of Object.values(obj)) {
+    // Every value in order: each Space nests the mp4 under different keys.
+    for (const value of Object.values(node as Record<string, unknown>)) {
       const hit = findVideoPath(value, depth + 1);
       if (hit) return hit;
     }

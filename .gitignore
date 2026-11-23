@@ -6,3 +6,8 @@ data
 *.log
 .DS_Store
 .tools/
+
+# deployment state / local secrets
+.productecho/
+.productecho-key
+*.zip

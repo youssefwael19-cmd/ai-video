@@ -22,7 +22,6 @@ interface ProviderState {
   totalMs: number;
   cooldownUntil: number;
   lastError?: string;
-  lastUsedAt?: number;
 }
 
 const state = new Map<string, ProviderState>();
@@ -36,9 +35,12 @@ function getState(id: string): ProviderState {
   return s;
 }
 
-function cooldownFor(consecutiveFailures: number): number {
+function cooldownFor(consecutiveFailures: number, retryable: boolean): number {
   if (consecutiveFailures <= 0) return 0;
-  const seconds = Math.min(15 * 60, 45 * Math.pow(3, consecutiveFailures - 1));
+  // A non-retryable refusal (spent quota, revoked key, rejected input) will not
+  // clear on its own, so park the provider for the whole window instead of
+  // asking it again 45 seconds later.
+  const seconds = retryable ? Math.min(15 * 60, 45 * Math.pow(3, consecutiveFailures - 1)) : 15 * 60;
   return Date.now() + seconds * 1000;
 }
 
@@ -107,13 +109,9 @@ export function configuredProviderCount(): number {
 export async function generateBeat(
   req: MotionRequest,
   onAttempt: (attempt: Attempt) => void,
-): Promise<{ output: ProviderOutput; provider: Provider; attempts: Attempt[] }> {
+): Promise<{ output: ProviderOutput; provider: Provider }> {
   const pool = buildProviderPool().filter((p) => p.isConfigured());
-  const attempts: Attempt[] = [];
-
-  if (pool.length === 0) {
-    throw new ProviderError('No providers configured', { retryable: false });
-  }
+  if (pool.length === 0) throw new ProviderError('No providers configured', { retryable: false });
 
   const now = Date.now();
   const ready: Provider[] = [];
@@ -128,7 +126,7 @@ export async function generateBeat(
 
     const cooldownSeconds = Math.ceil((s.cooldownUntil - now) / 1000);
     soonestReady = Math.min(soonestReady, s.cooldownUntil);
-    const skipped: Attempt = {
+    onAttempt({
       providerId: provider.id,
       label: provider.label,
       service: provider.service,
@@ -137,9 +135,7 @@ export async function generateBeat(
       skipped: true,
       cooldownSeconds,
       error: `cooling down for ${cooldownSeconds}s after: ${s.lastError ?? 'recent failure'}`,
-    };
-    attempts.push(skipped);
-    onAttempt(skipped);
+    });
   }
 
   if (ready.length === 0) {
@@ -154,16 +150,8 @@ export async function generateBeat(
 
   for (const provider of ready) {
     const s = getState(provider.id);
-    const attempt: Attempt = {
-      providerId: provider.id,
-      label: provider.label,
-      service: provider.service,
-      ok: false,
-      ms: 0,
-    };
     const started = Date.now();
     s.attempts += 1;
-    s.lastUsedAt = started;
 
     try {
       const controller = new AbortController();
@@ -181,23 +169,26 @@ export async function generateBeat(
       s.cooldownUntil = 0;
       s.lastError = undefined;
 
-      attempt.ok = true;
-      attempt.ms = ms;
-      attempts.push(attempt);
-      onAttempt(attempt);
-      return { output, provider, attempts };
+      onAttempt({ providerId: provider.id, label: provider.label, service: provider.service, ok: true, ms });
+      return { output, provider };
     } catch (err) {
-      const ms = Date.now() - started;
       const message = err instanceof Error ? err.message : String(err);
       s.failures += 1;
       s.consecutiveFailures += 1;
       s.lastError = message;
-      s.cooldownUntil = cooldownFor(s.consecutiveFailures);
+      s.cooldownUntil = cooldownFor(
+        s.consecutiveFailures,
+        err instanceof ProviderError ? err.detail.retryable : true,
+      );
 
-      attempt.ms = ms;
-      attempt.error = message;
-      attempts.push(attempt);
-      onAttempt(attempt);
+      onAttempt({
+        providerId: provider.id,
+        label: provider.label,
+        service: provider.service,
+        ok: false,
+        ms: Date.now() - started,
+        error: message,
+      });
       lastError = err;
     }
   }

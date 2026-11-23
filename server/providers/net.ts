@@ -1,39 +1,31 @@
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { config } from '../config.js';
 import { ProviderError } from './types.js';
 
 /**
- * Some free providers (Novita, Magic Hour) require a publicly
+ * Some free providers (Novita, Magic Hour, Agnes, Atmee) require a publicly
  * reachable https URL instead of a multipart upload. We publish the photo to a
  * free, no-account host and cache the resulting URL per job.
  */
 const cache = new Map<string, Promise<string>>();
 
 export function getPublicImageUrl(localPath: string): Promise<string> {
-  if (config.publicImageUrlOverride) {
-    const cached = cache.get(localPath);
-    if (cached) return cached;
-    const url = Promise.resolve(
-      `${config.publicImageUrlOverride.replace(/\/$/, '')}/${path.basename(localPath)}`,
-    );
-    cache.set(localPath, url);
-    return url;
-  }
-
   const cached = cache.get(localPath);
   if (cached) return cached;
 
-  const task = publish(localPath).catch((err) => {
-    cache.delete(localPath);
-    throw err;
-  });
+  const task = config.publicImageUrlOverride
+    ? Promise.resolve(`${config.publicImageUrlOverride.replace(/\/$/, '')}/${path.basename(localPath)}`)
+    : publish(localPath).catch((err) => {
+        cache.delete(localPath);
+        throw err;
+      });
   cache.set(localPath, task);
   return task;
 }
 
 async function publish(localPath: string): Promise<string> {
-  const bytes = await import('node:fs/promises').then((fs) => fs.readFile(localPath));
+  const bytes = await readFile(localPath);
   const errors: string[] = [];
 
   for (const host of [catbox, tmpfiles]) {
@@ -98,6 +90,25 @@ export function withDeadline(signal: AbortSignal, ms: number): AbortSignal {
     { once: true },
   );
   return controller.signal;
+}
+
+/** Wait `ms`, but reject the moment the caller cancels the beat. */
+export function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new ProviderError('Cancelled', { retryable: false }));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new ProviderError('Cancelled', { retryable: false }));
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /** Small helper for adapters that need to persist a remote mp4 locally. */
