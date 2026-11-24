@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir, readdir, rm, stat } from 'node:fs/promises';
+import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import ffmpegStatic from 'ffmpeg-static';
 import { config } from './config.js';
@@ -10,14 +10,18 @@ const ffmpegBin = ffmpegStatic ?? 'ffmpeg';
 export const BEAT_SECONDS = 5;
 export const TOTAL_SECONDS = 15;
 
+/**
+ * 720p keeps the free plan's 256 MiB container alive: libx264 at 1080p peaks
+ * around 300 MiB on its own, which got the process killed mid-compose.
+ */
 export function sizeFor(aspect: Aspect): { width: number; height: number } {
   switch (aspect) {
     case '9:16':
-      return { width: 1080, height: 1920 };
+      return { width: 720, height: 1280 };
     case '16:9':
-      return { width: 1920, height: 1080 };
+      return { width: 1280, height: 720 };
     default:
-      return { width: 1080, height: 1080 };
+      return { width: 720, height: 720 };
   }
 }
 
@@ -119,48 +123,73 @@ export interface ComposeInput {
 export async function composeSegments({ segments, aspect, outputPath }: ComposeInput): Promise<number> {
   const { width, height } = sizeFor(aspect);
   const durations = await Promise.all(segments.map((file) => probeDuration(file).catch(() => 0)));
+  const workDir = path.dirname(outputPath);
+  const normalised: string[] = [];
 
-  const filterParts: string[] = [];
-  segments.forEach((_, index) => {
+  // One beat at a time keeps the encoder's frame buffers to a single clip. A
+  // single filtergraph holding three inputs needed ~350 MiB and was OOM-killed.
+  for (let index = 0; index < segments.length; index += 1) {
     const measured = durations[index];
     const factor = measured > 0 && measured < BEAT_SECONDS - 0.15 ? Math.min(1.3, BEAT_SECONDS / measured) : 1;
     const slow = factor > 1.01 ? `,setpts=${factor.toFixed(4)}*PTS` : '';
-    filterParts.push(
-      `[${index}:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},` +
-        `fps=30,setpts=PTS-STARTPTS${slow},` +
-        `tpad=stop_mode=clone:stop_duration=${BEAT_SECONDS},trim=duration=${BEAT_SECONDS},setpts=PTS-STARTPTS,` +
-        `fade=t=in:st=0:d=0.25,fade=t=out:st=${BEAT_SECONDS - 0.25}:d=0.25,setsar=1[v${index}]`,
-    );
-  });
-  const concatInputs = segments.map((_, i) => `[v${i}]`).join('');
-  filterParts.push(`${concatInputs}concat=n=${segments.length}:v=1:a=0[out]`);
+    const beatPath = path.join(workDir, `${path.basename(outputPath, '.mp4')}-beat${index}.mp4`);
+    const filter =
+      `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},` +
+      `fps=30,setpts=PTS-STARTPTS${slow},` +
+      `tpad=stop_mode=clone:stop_duration=${BEAT_SECONDS},trim=duration=${BEAT_SECONDS},setpts=PTS-STARTPTS,` +
+      `fade=t=in:st=0:d=0.25,fade=t=out:st=${BEAT_SECONDS - 0.25}:d=0.25,setsar=1[v]`;
 
-  const args = [
-    '-y',
-    ...segments.flatMap((file) => ['-i', file]),
-    '-filter_complex',
-    filterParts.join(';'),
-    '-map',
-    '[out]',
-    '-an',
-    '-c:v',
-    'libx264',
-    '-preset',
-    'veryfast',
-    '-crf',
-    '20',
-    '-pix_fmt',
-    'yuv420p',
-    '-r',
-    '30',
-    '-t',
-    String(TOTAL_SECONDS),
-    '-movflags',
-    '+faststart',
-    outputPath,
-  ];
+    await run([
+      '-y',
+      '-i',
+      segments[index],
+      '-filter_complex',
+      filter,
+      '-map',
+      '[v]',
+      '-an',
+      '-c:v',
+      'libx264',
+      '-preset',
+      'veryfast',
+      '-crf',
+      '20',
+      '-pix_fmt',
+      'yuv420p',
+      '-r',
+      '30',
+      '-threads',
+      '1',
+      '-t',
+      String(BEAT_SECONDS),
+      beatPath,
+    ]);
+    normalised.push(beatPath);
+  }
 
-  await run(args);
+  const listPath = path.join(workDir, `${path.basename(outputPath, '.mp4')}-concat.txt`);
+  await writeFile(listPath, normalised.map((file) => `file '${file}'`).join('\n'));
+  try {
+    // The beats now share codec, size and frame rate, so the join is a copy.
+    await run([
+      '-y',
+      '-f',
+      'concat',
+      '-safe',
+      '0',
+      '-i',
+      listPath,
+      '-c',
+      'copy',
+      '-movflags',
+      '+faststart',
+      outputPath,
+    ]);
+  } finally {
+    await Promise.all(normalised.map((file) => rm(file, { force: true }).catch(() => {})));
+    await rm(listPath, { force: true }).catch(() => {});
+  }
+
   return TOTAL_SECONDS;
 }
 
@@ -226,6 +255,8 @@ export async function renderLocalSegment({
     'yuv420p',
     '-r',
     '30',
+    '-threads',
+    '1',
     '-t',
     String(BEAT_SECONDS),
     '-movflags',
