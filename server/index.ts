@@ -8,7 +8,8 @@ import { config } from './config.js';
 import { ensureDirs, pruneDataDir, TOTAL_SECONDS } from './compose.js';
 import { createJob, getJob, listJobs } from './jobs.js';
 import { configuredProviderCount, resetProviderHealth, snapshotProviders } from './gateway.js';
-import { loadStoredKeys, saveKey, snapshotSettings } from './settings.js';
+import { isKeyField, loadStoredKeys, saveKey, snapshotSettings } from './settings.js';
+import { testKey } from './providers/check.js';
 import type { Aspect, StylePreset } from './providers/types.js';
 
 const DEV = process.env.NODE_ENV !== 'production';
@@ -79,6 +80,25 @@ app.post('/api/settings', async (req, res) => {
 
 app.get('/api/jobs', (_req, res) => {
   res.json({ jobs: listJobs() });
+});
+
+/**
+ * Check a key with a read-only provider call — no video, no credits. Tests the
+ * value typed in the Settings row when one is sent, otherwise the saved/env key.
+ */
+app.post('/api/settings/test', async (req, res) => {
+  if (!settingsAllowed(req, res)) return;
+  res.setHeader('Cache-Control', 'no-store');
+
+  const body = (req.body ?? {}) as { field?: unknown; value?: unknown };
+  if (typeof body.field !== 'string' || !isKeyField(body.field)) {
+    return res.status(400).json({ error: 'Unknown key field' });
+  }
+
+  const typed = typeof body.value === 'string' ? body.value.trim().slice(0, 500) : '';
+  const key = typed || config.keys[body.field];
+  const result = await testKey(body.field, key);
+  return res.json({ ...result, testedValue: typed ? 'typed' : 'saved' });
 });
 
 app.post('/api/providers/reset', (_req, res) => {

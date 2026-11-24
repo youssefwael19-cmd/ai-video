@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "tsx watch --clear-screen=false --exclude \"vite.config.ts.timestamp-*\" --exclude \"data/**\" server/index.ts",
-    "build": "vite build",
+    "build": "NODE_ENV=production vite build",
     "start": "NODE_ENV=production node ./node_modules/tsx/dist/cli.mjs server/index.ts",
     "typecheck": "tsc --noEmit"
   },

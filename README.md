@@ -52,6 +52,7 @@ survive a restart. Clearing a slot removes the key.
 - `GET /api/jobs/:id` — status, per-beat provider, log
 - `GET /api/state` — provider pool and health
 - `GET|POST /api/settings` — key slots (`x-settings-password` when locked)
+- `POST /api/settings/test` — check a key with a read-only provider call (no render, no credits)
 - `GET /healthz` — liveness
 - `GET /media/renders/<id>.mp4` — finished video (`?download=1` to attach)
 

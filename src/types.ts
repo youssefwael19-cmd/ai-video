@@ -43,6 +43,25 @@ export interface SettingsView {
   slots: KeySlotView[];
 }
 
+export type KeyTestStatus =
+  | 'works'
+  | 'not-needed'
+  | 'missing'
+  | 'invalid'
+  | 'no-credits'
+  | 'limited'
+  | 'unreachable';
+
+export interface KeyTestResult {
+  field: string;
+  status: KeyTestStatus;
+  ok: boolean;
+  message: string;
+  detail: string | null;
+  ms: number;
+  testedValue: 'typed' | 'saved';
+}
+
 export interface SegmentView {
   index: number;
   label: string;

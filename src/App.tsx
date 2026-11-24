@@ -4,6 +4,7 @@ import type {
   Aspect,
   JobView,
   KeySlotView,
+  KeyTestResult,
   SegmentView,
   SettingsView,
   StylePreset,
@@ -143,6 +144,34 @@ export default function App() {
     [loadState, password],
   );
 
+  const testSetting = useCallback(
+    async (field: string, value: string): Promise<KeyTestResult | null> => {
+      setSettingsError(null);
+      try {
+        const res = await fetch('/api/settings/test', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(password ? { 'x-settings-password': password } : {}),
+          },
+          body: JSON.stringify({ field, value }),
+        });
+        const body = await res.json();
+        if (res.status === 401) {
+          setLocked(true);
+          setPassword('');
+          return null;
+        }
+        if (!res.ok) throw new Error(body.error ?? 'Could not test the key');
+        return body as KeyTestResult;
+      } catch (err) {
+        setSettingsError(err instanceof Error ? err.message : String(err));
+        return null;
+      }
+    },
+    [password],
+  );
+
   const pickFile = (next: File | null | undefined) => {
     if (!next) return;
     if (!next.type.startsWith('image/')) {
@@ -215,6 +244,7 @@ export default function App() {
           notice={notice}
           onUnlock={() => void loadSettings(password)}
           onSave={saveSetting}
+          onTest={testSetting}
         />
       ) : (
         <>
@@ -506,8 +536,9 @@ function KeysPanel(props: {
   notice: string | null;
   onUnlock: () => void;
   onSave: (field: string, value: string) => Promise<boolean>;
+  onTest: (field: string, value: string) => Promise<KeyTestResult | null>;
 }) {
-  const { settings, locked, password, setPassword, error, notice, onUnlock, onSave } = props;
+  const { settings, locked, password, setPassword, error, notice, onUnlock, onSave, onTest } = props;
   const slots = settings?.slots ?? [];
   const setCount = slots.filter((s) => s.configured).length;
 
@@ -552,7 +583,7 @@ function KeysPanel(props: {
       {!locked && (
         <div className="key-list">
           {slots.map((slot) => (
-            <KeyRow key={slot.field} slot={slot} onSave={onSave} />
+            <KeyRow key={slot.field} slot={slot} onSave={onSave} onTest={onTest} />
           ))}
         </div>
       )}
@@ -570,18 +601,33 @@ function KeysPanel(props: {
 function KeyRow({
   slot,
   onSave,
+  onTest,
 }: {
   slot: KeySlotView;
   onSave: (field: string, value: string) => Promise<boolean>;
+  onTest: (field: string, value: string) => Promise<KeyTestResult | null>;
 }) {
   const [value, setValue] = useState('');
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<KeyTestResult | null>(null);
 
   const submit = async (next: string) => {
     setBusy(true);
     const ok = await onSave(slot.field, next);
     setBusy(false);
-    if (ok) setValue('');
+    if (ok) {
+      setValue('');
+      setTestResult(null);
+    }
+  };
+
+  const test = async () => {
+    setTesting(true);
+    setTestResult(null);
+    const result = await onTest(slot.field, value.trim());
+    setTesting(false);
+    if (result) setTestResult(result);
   };
 
   return (
@@ -616,6 +662,14 @@ function KeyRow({
         <button className="ghost small" type="submit" disabled={busy || !value.trim()}>
           {busy ? 'Saving…' : 'Save'}
         </button>
+        <button
+          className="ghost small"
+          type="button"
+          onClick={() => void test()}
+          disabled={testing || busy}
+        >
+          {testing ? 'Testing…' : 'Test'}
+        </button>
         {slot.configured && (
           <button
             className="ghost small danger"
@@ -628,6 +682,14 @@ function KeyRow({
         )}
       </form>
 
+      {testResult && (
+        <p className={`key-test ${testTone(testResult)}`}>
+          {testResult.message}{' '}
+          <span className="mono">{(testResult.ms / 1000).toFixed(1)}s</span>
+          {testResult.detail && <span className="key-test-detail"> {testResult.detail}</span>}
+        </p>
+      )}
+
       <p className="key-note">
         {slot.note}{' '}
         <a href={slot.signupUrl} target="_blank" rel="noreferrer">
@@ -636,6 +698,12 @@ function KeyRow({
       </p>
     </article>
   );
+}
+
+function testTone(result: KeyTestResult): 'ok' | 'warn' | 'bad' {
+  if (result.status === 'works' || result.status === 'not-needed') return 'ok';
+  if (result.status === 'limited' || result.status === 'no-credits') return 'warn';
+  return 'bad';
 }
 
 function defaultBeats(): SegmentView[] {
