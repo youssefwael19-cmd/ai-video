@@ -8,3 +8,13 @@ createRoot(document.getElementById('root')!).render(
     <App />
   </React.StrictMode>,
 );
+
+// Registered only in the built app: the dev server has no /sw.js of its own and
+// a cached shell would hide hot reloads.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {
+      /* installing is optional; the app works without it */
+    });
+  });
+}
