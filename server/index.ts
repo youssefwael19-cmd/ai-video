@@ -5,7 +5,7 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import express from 'express';
 import multer from 'multer';
 import { config } from './config.js';
-import { ensureDirs, TOTAL_SECONDS } from './compose.js';
+import { ensureDirs, pruneDataDir, TOTAL_SECONDS } from './compose.js';
 import { createJob, getJob, listJobs } from './jobs.js';
 import { configuredProviderCount, resetProviderHealth, snapshotProviders } from './gateway.js';
 import { loadStoredKeys, saveKey, snapshotSettings } from './settings.js';
@@ -22,6 +22,9 @@ const upload = multer({
 
 await ensureDirs();
 await loadStoredKeys();
+void pruneDataDir().then((removed) => {
+  if (removed > 0) console.log(`Pruned ${removed} stale media file(s)`);
+});
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -112,9 +115,12 @@ app.post('/api/jobs', upload.single('image'), async (req, res) => {
   return res.status(201).json(job);
 });
 
+// Only the generated media is public. Serving DATA_DIR itself would also expose
+// settings.json, which holds the provider API keys.
+app.use('/media/uploads', express.static(config.uploadDir));
 app.use(
-  '/media',
-  express.static(config.dataDir, {
+  '/media/renders',
+  express.static(config.renderDir, {
     setHeaders: (res, filePath) => {
       if (filePath.endsWith('.mp4')) {
         const download = (res.req.query.download ?? '') === '1';
@@ -127,6 +133,15 @@ app.use(
     },
   }),
 );
+
+// A missing video or photo must 404 rather than fall through to index.html.
+app.use('/media', (_req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+app.get('/healthz', (_req, res) => {
+  res.json({ ok: true, configured: configuredProviderCount() });
+});
 
 const server = http.createServer(app);
 

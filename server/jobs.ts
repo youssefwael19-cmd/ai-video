@@ -83,9 +83,23 @@ export function createJob(input: {
     log: [],
     createdAt: Date.now(),
   };
+  evictOldJobs();
   jobs.set(id, job);
   void runJob(job, beats, input.imageMime);
   return toView(job);
+}
+
+/** Finished jobs are only kept for the history list, so drop the oldest first. */
+function evictOldJobs() {
+  const MAX_JOBS = 100;
+  if (jobs.size < MAX_JOBS) return;
+  const finished = [...jobs.values()]
+    .filter((job) => job.status === 'done' || job.status === 'error')
+    .sort((a, b) => a.createdAt - b.createdAt);
+  for (const job of finished) {
+    if (jobs.size < MAX_JOBS) break;
+    jobs.delete(job.id);
+  }
 }
 
 export function getJob(id: string): JobView | null {

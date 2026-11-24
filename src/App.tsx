@@ -338,7 +338,7 @@ export default function App() {
                 <span className="mono">{job ? job.status.toUpperCase() : 'IDLE'}</span>
               </div>
 
-              <div className={`player ${aspect.replace(':', '-')}`}>
+              <div className={`player aspect-${aspect.replace(':', '-')}`}>
                 {job?.videoUrl ? (
                   <video src={job.videoUrl} controls autoPlay loop playsInline />
                 ) : preview ? (

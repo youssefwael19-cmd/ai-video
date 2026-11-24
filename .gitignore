@@ -1,6 +1,7 @@
 node_modules
 dist
 data
+vite.config.ts.timestamp-*
 .env
 .env.local
 *.log

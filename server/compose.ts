@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readdir, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 import ffmpegStatic from 'ffmpeg-static';
 import { config } from './config.js';
@@ -27,6 +27,46 @@ export async function ensureDirs(): Promise<void> {
       mkdir(dir, { recursive: true }),
     ),
   );
+}
+
+const DAY = 24 * 60 * 60 * 1000;
+
+/**
+ * Working files are written for every render, so on an install that stays up
+ * (or a host that mounts a fixed volume) the directory would grow forever.
+ * Uploads and intermediate beats are thrown away after a day; finished videos
+ * are kept for a week so a link shared yesterday still plays.
+ */
+export async function pruneDataDir(): Promise<number> {
+  const now = Date.now();
+  const targets = [
+    { dir: config.uploadDir, maxAgeMs: DAY },
+    { dir: config.segmentDir, maxAgeMs: DAY },
+    { dir: config.renderDir, maxAgeMs: 7 * DAY },
+  ];
+
+  let removed = 0;
+  for (const { dir, maxAgeMs } of targets) {
+    let names: string[];
+    try {
+      names = await readdir(dir);
+    } catch {
+      continue;
+    }
+    for (const name of names) {
+      const file = path.join(dir, name);
+      try {
+        const info = await stat(file);
+        if (info.isFile() && now - info.mtimeMs > maxAgeMs) {
+          await rm(file, { force: true });
+          removed += 1;
+        }
+      } catch {
+        /* already gone, or not ours to remove */
+      }
+    }
+  }
+  return removed;
 }
 
 function run(args: string[]): Promise<{ stdout: string; stderr: string }> {
@@ -154,9 +194,12 @@ export async function renderLocalSegment({
   const moves = localMotion(frames);
   const move = moves[index % moves.length];
 
+  // d=1: the looped still already supplies one input frame per output frame, so
+  // letting zoompan emit `frames` frames per input would finish the move early
+  // and then hold it for the rest of the beat.
   const filter =
     `[0:v]scale=${w2}:${h2}:force_original_aspect_ratio=increase,crop=${w2}:${h2},` +
-    `${move}:d=${frames}:s=${width}x${height}:fps=30,` +
+    `${move}:d=1:s=${width}x${height}:fps=30,` +
     `trim=duration=${BEAT_SECONDS},setpts=PTS-STARTPTS,fade=t=in:st=0:d=0.25,` +
     `fade=t=out:st=${BEAT_SECONDS - 0.25}:d=0.25[v]`;
 
