@@ -11,7 +11,7 @@ import type {
 } from './types';
 
 const STYLES: { id: StylePreset; label: string; hint: string }[] = [
-  { id: 'cinematic', label: 'Cinematic', hint: 'moody light, film grain' },
+  { id: 'cinematic', label: 'Cinematic', hint: 'moody light, crisp focus' },
   { id: 'studio', label: 'Studio', hint: 'seamless white softbox' },
   { id: 'bold', label: 'Bold', hint: 'vivid retail colour' },
   { id: 'lifestyle', label: 'Lifestyle', hint: 'warm natural light' },

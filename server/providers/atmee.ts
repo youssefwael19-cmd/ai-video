@@ -2,7 +2,7 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { downloadToFile, sleep, withDeadline } from './net.js';
-import { ProviderError, type MotionRequest, type Provider } from './types.js';
+import { ProviderError, type Aspect, type MotionRequest, type Provider } from './types.js';
 
 /**
  * Atmee renders a clip from a photo and a motion prompt on every plan, Free
@@ -12,11 +12,30 @@ import { ProviderError, type MotionRequest, type Provider } from './types.js';
  */
 const BASE = 'https://api.atmanity.us';
 
-/** Sizes the API serves per frame shape; a refused size is retried as 480². */
-const RESOLUTIONS: Record<string, { width: number; height: number }> = {
-  '9:16': { width: 480, height: 854 },
-  '16:9': { width: 854, height: 480 },
-  '1:1': { width: 480, height: 480 },
+interface ClipSize {
+  width: number;
+  height: number;
+}
+
+/**
+ * Highest resolution first: 720p is 0.8 credits for a 5s 9:16 clip against 0.3
+ * for 480p, and it is the difference between generated detail and an upscale.
+ * 1080p is listed as coming soon, and the renderer serves only the sizes in its
+ * price list, so a refusal steps one size down rather than giving up the beat.
+ */
+const SIZES: Record<Aspect, ClipSize[]> = {
+  '9:16': [
+    { width: 720, height: 1280 },
+    { width: 468, height: 832 },
+  ],
+  '16:9': [
+    { width: 1280, height: 720 },
+    { width: 832, height: 468 },
+  ],
+  '1:1': [
+    { width: 720, height: 720 },
+    { width: 480, height: 480 },
+  ],
 };
 
 export function createAtmeeProviders(apiKey: string): Provider[] {
@@ -25,7 +44,7 @@ export function createAtmeeProviders(apiKey: string): Provider[] {
       id: 'atmee:v2-clips',
       label: 'atmee v2',
       service: 'Atmee',
-      model: 'Atmee V2 clip renderer (free plan credits)',
+      model: 'Atmee V2 clip renderer (720p, free plan credits)',
       maxSeconds: 15,
       requires: {
         env: 'ATMEE_API_KEY',
@@ -40,9 +59,10 @@ export function createAtmeeProviders(apiKey: string): Provider[] {
 
 async function run(apiKey: string, req: MotionRequest, signal: AbortSignal) {
   const image = await req.getPublicImageUrl();
-  const idempotencyKey = randomUUID();
+  const sizes = SIZES[req.aspect] ?? SIZES['1:1'];
+  let sizeIndex = 0;
+  let idempotencyKey = randomUUID();
   const deadline = Date.now() + 9 * 60_000;
-  let includeResolution = true;
   /** Last non-fatal answer, so a 9-minute spin reports why instead of "timed out". */
   let lastState = 'no response yet';
 
@@ -59,7 +79,7 @@ async function run(apiKey: string, req: MotionRequest, signal: AbortSignal) {
         prompt: req.prompt,
         durationSeconds: Math.min(15, Math.max(1, Math.round(req.seconds))),
         seed: req.seed,
-        ...(includeResolution ? { resolution: RESOLUTIONS[req.aspect] ?? RESOLUTIONS['1:1'] } : {}),
+        resolution: sizes[sizeIndex],
       }),
       signal: withDeadline(signal, 120_000),
     });
@@ -97,9 +117,18 @@ async function run(apiKey: string, req: MotionRequest, signal: AbortSignal) {
 
     const code = typeof body.error === 'string' ? body.error : `http_${res.status}`;
 
-    // This size is not being served right now: ask again with the default.
-    if (res.status === 400 && includeResolution && /resolution/i.test(`${code} ${body.message ?? ''}`)) {
-      includeResolution = false;
+    // A size that is not served answers 400 invalid_input (naming the sizes),
+    // and credits that cannot cover 720p answer 402. Either way the beat is
+    // better at 480p than not at all, so step one size down and ask again.
+    const sizeRefused =
+      ((res.status === 400 || res.status === 422) &&
+        /resolution|\bsizes?\b/i.test(`${code} ${body.message ?? ''}`)) ||
+      res.status === 402;
+    if (sizeRefused && sizeIndex + 1 < sizes.length) {
+      sizeIndex += 1;
+      // A key reused with different inputs is itself a 400 invalid_input.
+      idempotencyKey = randomUUID();
+      lastState = `the ${sizes[sizeIndex - 1].width}x${sizes[sizeIndex - 1].height} size was refused`;
       continue;
     }
 

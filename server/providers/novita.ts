@@ -30,7 +30,14 @@ async function run(apiKey: string, req: MotionRequest, signal: AbortSignal) {
     headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       input: { prompt: req.prompt, negative_prompt: req.negativePrompt, img_url: imageUrl },
-      parameters: { duration: Math.min(5, req.seconds), prompt_extend: true, seed: req.seed },
+      // 720P is the top tier this model serves; the 480P default was the reason
+      // these beats looked softer than the others in the same video.
+      parameters: {
+        duration: Math.min(5, req.seconds),
+        resolution: '720P',
+        prompt_extend: true,
+        seed: req.seed,
+      },
     }),
     signal: AbortSignal.timeout(60_000),
   });

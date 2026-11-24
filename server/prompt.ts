@@ -13,7 +13,7 @@ export const BEAUTY = {
 
 const STYLE_LOOK: Record<StylePreset, string> = {
   cinematic:
-    'moody cinematic lighting, shallow depth of field, gentle film grain, premium commercial feel',
+    'moody cinematic lighting, shallow depth of field, crisp focus, premium commercial feel',
   studio:
     'clean seamless studio backdrop, large soft box lighting, crisp product photography, neutral shadows',
   bold: 'vivid saturated backdrop, punchy contrast, energetic commercial lighting, high fashion retail feel',

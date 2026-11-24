@@ -11,6 +11,13 @@ export const BEAT_SECONDS = 5;
 export const TOTAL_SECONDS = 15;
 
 /**
+ * Atmee renders at 25 fps and LTX at 24, so 25 keeps every generated frame.
+ * Retiming those to 30 only ever duplicated frames, which read as judder on the
+ * slow camera moves these beats use.
+ */
+const FPS = 25;
+
+/**
  * 720p keeps the free plan's 256 MiB container alive: libx264 at 1080p peaks
  * around 300 MiB on its own, which got the process killed mid-compose.
  */
@@ -91,8 +98,14 @@ function run(args: string[]): Promise<{ stdout: string; stderr: string }> {
   });
 }
 
+export interface MediaInfo {
+  seconds: number;
+  width: number;
+  height: number;
+}
+
 /** ffmpeg is used for probing too, so no extra binary is needed. */
-export async function probeDuration(file: string): Promise<number> {
+export async function probeMedia(file: string): Promise<MediaInfo> {
   const child = spawn(ffmpegBin, ['-i', file], { stdio: ['ignore', 'pipe', 'pipe'] });
   let stderr = '';
   const collect = (d: Buffer) => (stderr += d.toString());
@@ -103,10 +116,20 @@ export async function probeDuration(file: string): Promise<number> {
   });
   child.stdout?.on('data', () => undefined);
   await done;
-  const match = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(stderr);
-  if (!match) return 0;
-  const [, h, m, s] = match;
-  return Number(h) * 3600 + Number(m) * 60 + Number(s);
+
+  const duration = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(stderr);
+  const size = /Video:.*?(\d{2,5})x(\d{2,5})/.exec(stderr);
+  return {
+    seconds: duration
+      ? Number(duration[1]) * 3600 + Number(duration[2]) * 60 + Number(duration[3])
+      : 0,
+    width: size ? Number(size[1]) : 0,
+    height: size ? Number(size[2]) : 0,
+  };
+}
+
+export async function probeDuration(file: string): Promise<number> {
+  return (await probeMedia(file)).seconds;
 }
 
 export interface ComposeInput {
@@ -122,22 +145,34 @@ export interface ComposeInput {
  */
 export async function composeSegments({ segments, aspect, outputPath }: ComposeInput): Promise<number> {
   const { width, height } = sizeFor(aspect);
-  const durations = await Promise.all(segments.map((file) => probeDuration(file).catch(() => 0)));
+  const empty: MediaInfo = { seconds: 0, width: 0, height: 0 };
+  const infos = await Promise.all(segments.map((file) => probeMedia(file).catch(() => empty)));
   const workDir = path.dirname(outputPath);
   const normalised: string[] = [];
 
   // One beat at a time keeps the encoder's frame buffers to a single clip. A
   // single filtergraph holding three inputs needed ~350 MiB and was OOM-killed.
   for (let index = 0; index < segments.length; index += 1) {
-    const measured = durations[index];
+    const info = infos[index];
+    const measured = info.seconds;
     const factor = measured > 0 && measured < BEAT_SECONDS - 0.15 ? Math.min(1.3, BEAT_SECONDS / measured) : 1;
     const slow = factor > 1.01 ? `,setpts=${factor.toFixed(4)}*PTS` : '';
+    // Lanczos holds more edge contrast than the default scaler, and a mild
+    // unsharp pass only on beats that really are being enlarged puts back some
+    // of the detail the model's low-resolution render averaged away.
+    const enlarging = info.width > 0 && (info.width < width || info.height < height);
+    const sharpen = enlarging ? ',unsharp=5:5:0.7:5:5:0' : '';
+    // Fade only at the ends of the finished video: a fade on every beat dipped
+    // the whole thing to black three times in fifteen seconds.
+    const fadeIn = index === 0 ? ',fade=t=in:st=0:d=0.4' : '';
+    const fadeOut =
+      index === segments.length - 1 ? `,fade=t=out:st=${BEAT_SECONDS - 0.4}:d=0.4` : '';
     const beatPath = path.join(workDir, `${path.basename(outputPath, '.mp4')}-beat${index}.mp4`);
     const filter =
-      `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},` +
-      `fps=30,setpts=PTS-STARTPTS${slow},` +
+      `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height}` +
+      `${sharpen},fps=${FPS},setpts=PTS-STARTPTS${slow},` +
       `tpad=stop_mode=clone:stop_duration=${BEAT_SECONDS},trim=duration=${BEAT_SECONDS},setpts=PTS-STARTPTS,` +
-      `fade=t=in:st=0:d=0.25,fade=t=out:st=${BEAT_SECONDS - 0.25}:d=0.25,setsar=1[v]`;
+      `setsar=1${fadeIn}${fadeOut}[v]`;
 
     await run([
       '-y',
@@ -153,11 +188,11 @@ export async function composeSegments({ segments, aspect, outputPath }: ComposeI
       '-preset',
       'veryfast',
       '-crf',
-      '20',
+      '18',
       '-pix_fmt',
       'yuv420p',
       '-r',
-      '30',
+      String(FPS),
       '-threads',
       '1',
       '-t',
@@ -219,25 +254,25 @@ export async function renderLocalSegment({
   const { width, height } = sizeFor(aspect);
   const w2 = width * 2;
   const h2 = height * 2;
-  const frames = BEAT_SECONDS * 30;
+  const frames = BEAT_SECONDS * FPS;
   const moves = localMotion(frames);
   const move = moves[index % moves.length];
 
   // d=1: the looped still already supplies one input frame per output frame, so
   // letting zoompan emit `frames` frames per input would finish the move early
-  // and then hold it for the rest of the beat.
+  // and then hold it for the rest of the beat. The beat is composited later, so
+  // the end-of-video fades are left to composeSegments.
   const filter =
-    `[0:v]scale=${w2}:${h2}:force_original_aspect_ratio=increase,crop=${w2}:${h2},` +
-    `${move}:d=1:s=${width}x${height}:fps=30,` +
-    `trim=duration=${BEAT_SECONDS},setpts=PTS-STARTPTS,fade=t=in:st=0:d=0.25,` +
-    `fade=t=out:st=${BEAT_SECONDS - 0.25}:d=0.25[v]`;
+    `[0:v]scale=${w2}:${h2}:force_original_aspect_ratio=increase:flags=lanczos,crop=${w2}:${h2},` +
+    `${move}:d=1:s=${width}x${height}:fps=${FPS},` +
+    `trim=duration=${BEAT_SECONDS},setpts=PTS-STARTPTS[v]`;
 
   await run([
     '-y',
     '-loop',
     '1',
     '-framerate',
-    '30',
+    String(FPS),
     '-i',
     imagePath,
     '-filter_complex',
@@ -250,11 +285,11 @@ export async function renderLocalSegment({
     '-preset',
     'veryfast',
     '-crf',
-    '21',
+    '18',
     '-pix_fmt',
     'yuv420p',
     '-r',
-    '30',
+    String(FPS),
     '-threads',
     '1',
     '-t',
