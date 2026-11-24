@@ -131,7 +131,13 @@ app.post('/api/jobs', upload.single('image'), async (req, res) => {
   const imagePath = path.join(config.uploadDir, `${randomUUID()}${ext}`);
   await writeFile(imagePath, file.buffer);
 
-  const job = createJob({ imagePath, imageMime: file.mimetype, brief, style, aspect });
+  // URL-only providers must fetch the photo themselves, so hand them this app's
+  // own public address instead of a third-party host that may answer with HTML.
+  const proto = (req.get('x-forwarded-proto') ?? req.protocol).split(',')[0].trim() || 'https';
+  const host = (req.get('x-forwarded-host') ?? req.get('host') ?? '').split(',')[0].trim();
+  const publicBase = host ? `${proto}://${host}` : undefined;
+
+  const job = createJob({ imagePath, imageMime: file.mimetype, brief, style, aspect, publicBase });
   return res.status(201).json(job);
 });
 

@@ -48,6 +48,8 @@ export interface JobView {
 
 interface StoredJob extends JobView {
   imagePath: string;
+  /** The app's own public origin, used to serve the photo to URL-only providers. */
+  publicBase?: string;
 }
 
 const jobs = new Map<string, StoredJob>();
@@ -59,6 +61,7 @@ export function createJob(input: {
   brief: string;
   style: StylePreset;
   aspect: Aspect;
+  publicBase?: string;
 }): JobView {
   const id = randomUUID();
   const beats = planBeats(input.brief, input.style);
@@ -70,6 +73,7 @@ export function createJob(input: {
     style: input.style,
     brief: input.brief,
     imagePath: input.imagePath,
+    publicBase: input.publicBase,
     imageUrl: `/media/uploads/${path.basename(input.imagePath)}`,
     durationSeconds: TOTAL_SECONDS,
     usedFallback: false,
@@ -126,7 +130,7 @@ async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
     job.status = 'running';
     log(job, `Beat plan ready — ${beats.length} × 5s clips stitched to ${TOTAL_SECONDS}s`, 'info');
     log(job, `Publishing product photo for URL-based providers…`);
-    getPublicImageUrl(job.imagePath).then(
+    getPublicImageUrl(job.imagePath, job.publicBase).then(
       (url) => log(job, `Photo reachable at ${url}`, 'ok'),
       () => log(job, 'Could not publish photo publicly — upload-only providers will still work', 'warn'),
     );
@@ -147,7 +151,7 @@ async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
         seconds: 5,
         aspect: job.aspect,
         seed: index === 0 ? 12345 : 12345 + index,
-        getPublicImageUrl: () => getPublicImageUrl(job.imagePath),
+        getPublicImageUrl: () => getPublicImageUrl(job.imagePath, job.publicBase),
       };
 
       try {

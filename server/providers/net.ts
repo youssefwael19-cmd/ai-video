@@ -10,17 +10,68 @@ import { ProviderError } from './types.js';
  */
 const cache = new Map<string, Promise<string>>();
 
-export function getPublicImageUrl(localPath: string): Promise<string> {
-  const cached = cache.get(localPath);
+/**
+ * URL-based providers must fetch a real image. catbox/tmpfiles sometimes answer
+ * with a redirect to an HTML page, which every provider rejects, so anything we
+ * get from a third party is fetched once and checked before it is handed on.
+ */
+async function isUsableImageUrl(url: string): Promise<boolean> {
+  try {
+    const res = await fetch(url, {
+      redirect: 'follow',
+      signal: AbortSignal.timeout(20_000),
+      headers: { accept: 'image/*' },
+    });
+    const type = res.headers.get('content-type') ?? '';
+    await res.body?.cancel().catch(() => {});
+    return res.ok && type.toLowerCase().startsWith('image/');
+  } catch {
+    return false;
+  }
+}
+
+/** Internal/loopback hosts are not reachable by an external provider. */
+function isPublicBase(base: string): boolean {
+  try {
+    const host = new URL(base).hostname;
+    return !(
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '0.0.0.0' ||
+      host === '[::1]' ||
+      host.endsWith('.local') ||
+      host.endsWith('.internal')
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * `publicBase` is the app's own public origin (e.g. https://app.example.com),
+ * derived from the incoming request so photos are served by us instead of a
+ * third-party host that providers cannot reliably download from.
+ */
+export function getPublicImageUrl(localPath: string, publicBase?: string): Promise<string> {
+  // An explicit override is a complete directory (legacy behaviour); a request
+  // derived origin is the app root, where the photo lives under /media/uploads.
+  const configured = config.publicImageUrlOverride.replace(/\/$/, '');
+  const directory = configured
+    ? configured
+    : publicBase && isPublicBase(publicBase)
+      ? `${publicBase.replace(/\/$/, '')}/media/uploads`
+      : '';
+  const cacheKey = `${directory}|${localPath}`;
+  const cached = cache.get(cacheKey);
   if (cached) return cached;
 
-  const task = config.publicImageUrlOverride
-    ? Promise.resolve(`${config.publicImageUrlOverride.replace(/\/$/, '')}/${path.basename(localPath)}`)
+  const task = directory
+    ? Promise.resolve(`${directory}/${path.basename(localPath)}`)
     : publish(localPath).catch((err) => {
-        cache.delete(localPath);
+        cache.delete(cacheKey);
         throw err;
       });
-  cache.set(localPath, task);
+  cache.set(cacheKey, task);
   return task;
 }
 
@@ -31,7 +82,8 @@ async function publish(localPath: string): Promise<string> {
   for (const host of [catbox, tmpfiles]) {
     try {
       const url = await host(bytes, path.basename(localPath));
-      if (url) return url;
+      if (url && (await isUsableImageUrl(url))) return url;
+      errors.push(`${url ? 'upload host returned a non-image response' : 'upload host returned no URL'}`);
     } catch (err) {
       errors.push(err instanceof Error ? err.message : String(err));
     }
