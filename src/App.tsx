@@ -403,7 +403,7 @@ export default function App() {
                     <strong>{segment.label}</strong>
                     <span className="beat-provider">
                       {segment.providerLabel
-                        ? `${segment.providerLabel} · ${segment.attempts} attempt${segment.attempts === 1 ? '' : 's'}`
+                        ? `${segment.providerLabel}${segment.resolution ? ` · ${segment.resolution}` : ''} · ${segment.attempts} attempt${segment.attempts === 1 ? '' : 's'}`
                         : segment.status === 'fallback'
                           ? 'local motion pass'
                           : segment.status === 'failed'

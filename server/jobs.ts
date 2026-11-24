@@ -10,7 +10,13 @@ import {
   buildBeatPrompt,
   planBeats,
 } from './prompt.js';
-import { composeSegments, renderLocalSegment, renderPath, TOTAL_SECONDS } from './compose.js';
+import {
+  composeSegments,
+  probeMedia,
+  renderLocalSegment,
+  renderPath,
+  TOTAL_SECONDS,
+} from './compose.js';
 import { config } from './config.js';
 
 export type JobStatus = 'queued' | 'running' | 'composing' | 'done' | 'error';
@@ -23,6 +29,8 @@ export interface SegmentView {
   providerId?: string;
   providerLabel?: string;
   model?: string;
+  /** Size the clip actually came back at, e.g. ``720x1280``. */
+  resolution?: string;
   attempts: number;
   durationSeconds?: number;
   error?: string;
@@ -238,6 +246,7 @@ async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
         getPublicImageUrl: () => getPublicImageUrl(job.imagePath, job.publicBase),
       };
 
+      let successMs = 0;
       try {
         const { output, provider } = await generateBeat(request, (attempt: Attempt) => {
           if (attempt.skipped) {
@@ -245,14 +254,29 @@ async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
             return;
           }
           segment.attempts += 1;
+          if (attempt.ok) {
+            // Logged once the clip is probed: the size it really came back at
+            // is what shows a provider serving a cheaper tier than requested.
+            successMs = attempt.ms;
+            return;
+          }
           log(
             job,
-            attempt.ok
-              ? `${beat.label} → ${attempt.label} succeeded in ${(attempt.ms / 1000).toFixed(1)}s`
-              : `${beat.label} → ${attempt.label} declined: ${attempt.error ?? 'unknown error'} — trying next provider`,
-            attempt.ok ? 'ok' : 'warn',
+            `${beat.label} → ${attempt.label} declined: ${attempt.error ?? 'unknown error'} — trying next provider`,
+            'warn',
           );
         });
+        // Reported by every provider, including Atmee stepping down to 480p
+        // when credits are short, so a quality drop is visible in the job.
+        const info = await probeMedia(output.videoPath).catch(() => null);
+        segment.resolution = info && info.width > 0 ? `${info.width}x${info.height}` : undefined;
+        log(
+          job,
+          `${beat.label} → ${provider.label} succeeded in ${(successMs / 1000).toFixed(1)}s${
+            segment.resolution ? ` at ${segment.resolution}` : ''
+          }`,
+          'ok',
+        );
         segment.status = 'done';
         segment.providerId = provider.id;
         segment.providerLabel = provider.label;
@@ -290,10 +314,14 @@ async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
           outputPath: dest,
         });
         clips[index] = dest;
+        const info = await probeMedia(dest).catch(() => null);
+        job.segments[index].resolution = info && info.width > 0 ? `${info.width}x${info.height}` : undefined;
         job.segments[index].status = 'fallback';
         log(
           job,
-          `${beats[index].label} → no AI clip, so the local motion pass fills this beat`,
+          `${beats[index].label} → no AI clip, so the local motion pass fills this beat${
+            job.segments[index].resolution ? ` at ${job.segments[index].resolution}` : ''
+          }`,
           'warn',
         );
       }

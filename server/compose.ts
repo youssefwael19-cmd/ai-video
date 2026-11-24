@@ -140,8 +140,9 @@ export interface ComposeInput {
 
 /**
  * Stitch the generated beats into exactly 15 seconds: every beat fills a 5s
- * slot (retimed if the model returned a different length) and short fades hide
- * the cut between beats.
+ * slot. A clip shorter than that holds its last frame for the rest of the slot
+ * instead of being stretched into slow motion; only the ends of the finished
+ * video fade.
  */
 export async function composeSegments({ segments, aspect, outputPath }: ComposeInput): Promise<number> {
   const { width, height } = sizeFor(aspect);
@@ -154,9 +155,6 @@ export async function composeSegments({ segments, aspect, outputPath }: ComposeI
   // single filtergraph holding three inputs needed ~350 MiB and was OOM-killed.
   for (let index = 0; index < segments.length; index += 1) {
     const info = infos[index];
-    const measured = info.seconds;
-    const factor = measured > 0 && measured < BEAT_SECONDS - 0.15 ? Math.min(1.3, BEAT_SECONDS / measured) : 1;
-    const slow = factor > 1.01 ? `,setpts=${factor.toFixed(4)}*PTS` : '';
     // Lanczos holds more edge contrast than the default scaler, and a mild
     // unsharp pass only on beats that really are being enlarged puts back some
     // of the detail the model's low-resolution render averaged away.
@@ -168,11 +166,15 @@ export async function composeSegments({ segments, aspect, outputPath }: ComposeI
     const fadeOut =
       index === segments.length - 1 ? `,fade=t=out:st=${BEAT_SECONDS - 0.4}:d=0.4` : '';
     const beatPath = path.join(workDir, `${path.basename(outputPath, '.mp4')}-beat${index}.mp4`);
+    // A short clip holds its last frame for the rest of its slot: tpad clones it
+    // and the trim keeps exactly 5s, so nothing is slowed down to fill the slot.
+    // Neither `fps` nor `setpts` may run before tpad — either one silently stops
+    // it padding, which is how a 3s beat once shortened the video to 13s. The
+    // 25fps conversion is done by the encoder's `-r` instead.
     const filter =
       `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height}` +
-      `${sharpen},fps=${FPS},setpts=PTS-STARTPTS${slow},` +
-      `tpad=stop_mode=clone:stop_duration=${BEAT_SECONDS},trim=duration=${BEAT_SECONDS},setpts=PTS-STARTPTS,` +
-      `setsar=1${fadeIn}${fadeOut}[v]`;
+      `${sharpen},tpad=stop_mode=clone:stop_duration=${BEAT_SECONDS},` +
+      `trim=duration=${BEAT_SECONDS},setpts=PTS-STARTPTS,setsar=1${fadeIn}${fadeOut}[v]`;
 
     await run([
       '-y',

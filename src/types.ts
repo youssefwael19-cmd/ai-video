@@ -70,6 +70,8 @@ export interface SegmentView {
   providerId?: string;
   providerLabel?: string;
   model?: string;
+  /** Size the clip actually came back at, e.g. ``720x1280``. */
+  resolution?: string;
   attempts: number;
   error?: string;
 }
