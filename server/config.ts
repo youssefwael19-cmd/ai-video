@@ -27,6 +27,9 @@ export const config = {
     atmee: (process.env.ATMEE_API_KEY ?? '').trim(),
   },
 
+  /** Optional: when set, the Settings tab asks for it before keys can be changed. */
+  settingsPassword: (process.env.SETTINGS_PASSWORD ?? '').trim(),
+
   enableLocalFallback: (process.env.ENABLE_LOCAL_FALLBACK ?? 'true') !== 'false',
   publicImageUrlOverride: (process.env.PUBLIC_IMAGE_URL_OVERRIDE ?? '').trim(),
 };

@@ -1,13 +1,14 @@
 import http from 'node:http';
 import path from 'node:path';
 import { writeFile } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import express from 'express';
 import multer from 'multer';
 import { config } from './config.js';
 import { ensureDirs, TOTAL_SECONDS } from './compose.js';
 import { createJob, getJob, listJobs } from './jobs.js';
 import { configuredProviderCount, resetProviderHealth, snapshotProviders } from './gateway.js';
+import { loadStoredKeys, saveKey, snapshotSettings } from './settings.js';
 import type { Aspect, StylePreset } from './providers/types.js';
 
 const DEV = process.env.NODE_ENV !== 'production';
@@ -20,6 +21,7 @@ const upload = multer({
 });
 
 await ensureDirs();
+await loadStoredKeys();
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -32,6 +34,44 @@ app.get('/api/state', (_req, res) => {
     totalSeconds: TOTAL_SECONDS,
     beats: 3,
   });
+});
+
+/**
+ * The Settings tab writes real API keys, so when SETTINGS_PASSWORD is set the
+ * whole settings API needs it. Without the env var the app stays open, which is
+ * what a single-user install wants.
+ */
+function settingsAllowed(req: express.Request, res: express.Response): boolean {
+  const required = config.settingsPassword;
+  if (!required) return true;
+  const provided = req.get('x-settings-password') ?? '';
+  const a = Buffer.from(provided);
+  const b = Buffer.from(required);
+  if (a.length === b.length && timingSafeEqual(a, b)) return true;
+  res.status(401).json({ error: 'Settings password required', passwordRequired: true });
+  return false;
+}
+
+app.get('/api/settings', (req, res) => {
+  if (!settingsAllowed(req, res)) return;
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ passwordRequired: Boolean(config.settingsPassword), slots: snapshotSettings() });
+});
+
+app.post('/api/settings', async (req, res) => {
+  if (!settingsAllowed(req, res)) return;
+  const body = (req.body ?? {}) as { field?: unknown; value?: unknown };
+  if (typeof body.field !== 'string') return res.status(400).json({ error: 'Missing key field' });
+  if (typeof body.value !== 'string') return res.status(400).json({ error: 'Missing key value' });
+
+  try {
+    const slots = await saveKey(body.field, body.value);
+    // A new key must be usable immediately, including one that was cooling down.
+    resetProviderHealth();
+    return res.json({ ok: true, slots, providers: snapshotProviders(), configured: configuredProviderCount() });
+  } catch (err) {
+    return res.status(400).json({ error: err instanceof Error ? err.message : 'Could not save the key' });
+  }
 });
 
 app.get('/api/jobs', (_req, res) => {

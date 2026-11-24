@@ -26,6 +26,23 @@ export interface AppState {
   beats: number;
 }
 
+export interface KeySlotView {
+  field: string;
+  env: string;
+  label: string;
+  service: string;
+  signupUrl: string;
+  note: string;
+  configured: boolean;
+  preview: string | null;
+  source: 'saved' | 'env' | 'none';
+}
+
+export interface SettingsView {
+  passwordRequired: boolean;
+  slots: KeySlotView[];
+}
+
 export interface SegmentView {
   index: number;
   label: string;
