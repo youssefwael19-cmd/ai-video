@@ -48,6 +48,8 @@ export interface JobView {
 }
 
 interface StoredJob extends JobView {
+  /** Last time this pod wrote the job, used to spot a render orphaned by a restart. */
+  updatedAt?: number;
   imagePath: string;
   /** The app's own public origin, used to serve the photo to URL-only providers. */
   publicBase?: string;
@@ -62,14 +64,23 @@ const active = new Set<string>();
  * Every change is mirrored to DATA_DIR/jobs, which all replicas share.
  */
 async function persist(job: StoredJob): Promise<void> {
-  try {
-    await mkdir(config.jobsDir, { recursive: true });
-    const file = path.join(config.jobsDir, `${job.id}.json`);
-    const tmp = `${file}.${process.pid}.tmp`;
-    await writeFile(tmp, JSON.stringify(job), { mode: 0o600 });
-    await rename(tmp, file);
-  } catch (err) {
-    console.warn(`Could not persist job ${job.id}: ${err instanceof Error ? err.message : err}`);
+  job.updatedAt = Date.now();
+  const file = path.join(config.jobsDir, `${job.id}.json`);
+  // Replicas can share a PID, so a pid-based temp name collides when two pods
+  // write the same job and the second rename finds the file already moved.
+  const tmp = `${file}.${randomUUID()}.tmp`;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      await mkdir(config.jobsDir, { recursive: true });
+      await writeFile(tmp, JSON.stringify(job), { mode: 0o600 });
+      await rename(tmp, file);
+      return;
+    } catch (err) {
+      await unlink(tmp).catch(() => {});
+      if (attempt === 2) {
+        console.warn(`Could not persist job ${job.id}: ${err instanceof Error ? err.message : err}`);
+      }
+    }
   }
 }
 
@@ -160,10 +171,25 @@ function evictOldJobs() {
   }
 }
 
+/** A pod that is killed mid-render leaves its job marked running forever. */
+function reconcile(job: StoredJob): StoredJob {
+  const unfinished = job.status === 'queued' || job.status === 'running' || job.status === 'composing';
+  const stale = Date.now() - (job.updatedAt ?? job.createdAt) > 15 * 60_000;
+  if (unfinished && stale) {
+    return {
+      ...job,
+      status: 'error',
+      error: 'The render was interrupted (the app restarted mid-job) — start it again',
+      finishedAt: Date.now(),
+    };
+  }
+  return job;
+}
+
 export async function getJob(id: string): Promise<JobView | null> {
   // A job this pod is running is authoritative; otherwise read the shared copy
   // another replica wrote.
-  const job = jobs.get(id) ?? (await readPersisted(id));
+  const job = jobs.get(id) ?? (await readPersisted(id).then((j) => (j ? reconcile(j) : null)));
   return job ? toView(job) : null;
 }
 
@@ -306,7 +332,7 @@ export async function listJobs(): Promise<JobView[]> {
       const id = name.slice(0, -5);
       if (merged.has(id)) continue;
       const job = await readPersisted(id);
-      if (job) merged.set(id, job);
+      if (job) merged.set(id, reconcile(job));
     }
   } catch {
     /* no jobs directory yet */
