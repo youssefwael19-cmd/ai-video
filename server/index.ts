@@ -6,7 +6,7 @@ import express from 'express';
 import multer from 'multer';
 import { config } from './config.js';
 import { ensureDirs, pruneDataDir, TOTAL_SECONDS } from './compose.js';
-import { createJob, getJob, listJobs } from './jobs.js';
+import { createJob, getJob, listJobs, pruneJobs } from './jobs.js';
 import { configuredProviderCount, resetProviderHealth, snapshotProviders } from './gateway.js';
 import { isKeyField, loadStoredKeys, saveKey, snapshotSettings } from './settings.js';
 import { testKey } from './providers/check.js';
@@ -26,6 +26,7 @@ await loadStoredKeys();
 void pruneDataDir().then((removed) => {
   if (removed > 0) console.log(`Pruned ${removed} stale media file(s)`);
 });
+void pruneJobs();
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -78,8 +79,8 @@ app.post('/api/settings', async (req, res) => {
   }
 });
 
-app.get('/api/jobs', (_req, res) => {
-  res.json({ jobs: listJobs() });
+app.get('/api/jobs', async (_req, res) => {
+  res.json({ jobs: await listJobs() });
 });
 
 /**
@@ -106,8 +107,8 @@ app.post('/api/providers/reset', (_req, res) => {
   res.json({ ok: true, providers: snapshotProviders() });
 });
 
-app.get('/api/jobs/:id', (req, res) => {
-  const job = getJob(req.params.id);
+app.get('/api/jobs/:id', async (req, res) => {
+  const job = await getJob(req.params.id);
   if (!job) return res.status(404).json({ error: 'Job not found' });
   return res.json(job);
 });

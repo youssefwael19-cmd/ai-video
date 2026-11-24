@@ -14,6 +14,7 @@ export const config = {
   root,
   dataDir,
   uploadDir: path.join(dataDir, 'uploads'),
+  jobsDir: path.join(dataDir, 'jobs'),
   segmentDir: path.join(dataDir, 'segments'),
   renderDir: path.join(dataDir, 'renders'),
 

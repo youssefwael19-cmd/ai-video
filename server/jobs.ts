@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { generateBeat, type Attempt } from './gateway.js';
 import { getPublicImageUrl } from './providers/net.js';
@@ -55,6 +56,57 @@ interface StoredJob extends JobView {
 const jobs = new Map<string, StoredJob>();
 const active = new Set<string>();
 
+/**
+ * The deployment can run more than one replica, and a rollout replaces pods, so
+ * an in-memory map alone loses a job the moment a poll lands on another pod.
+ * Every change is mirrored to DATA_DIR/jobs, which all replicas share.
+ */
+async function persist(job: StoredJob): Promise<void> {
+  try {
+    await mkdir(config.jobsDir, { recursive: true });
+    const file = path.join(config.jobsDir, `${job.id}.json`);
+    const tmp = `${file}.${process.pid}.tmp`;
+    await writeFile(tmp, JSON.stringify(job), { mode: 0o600 });
+    await rename(tmp, file);
+  } catch (err) {
+    console.warn(`Could not persist job ${job.id}: ${err instanceof Error ? err.message : err}`);
+  }
+}
+
+function isJobId(id: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+}
+
+async function readPersisted(id: string): Promise<StoredJob | null> {
+  if (!isJobId(id)) return null;
+  try {
+    const raw = await readFile(path.join(config.jobsDir, `${id}.json`), 'utf8');
+    return JSON.parse(raw) as StoredJob;
+  } catch {
+    return null;
+  }
+}
+
+/** Keep the newest `MAX_JOBS` job files so the volume cannot grow forever. */
+export async function pruneJobs(): Promise<void> {
+  try {
+    const names = (await readdir(config.jobsDir)).filter((name) => name.endsWith('.json'));
+    if (names.length <= MAX_JOBS) return;
+    const stamped = await Promise.all(
+      names.map(async (name) => {
+        const info = await stat(path.join(config.jobsDir, name)).catch(() => null);
+        return { name, mtime: info?.mtimeMs ?? 0 };
+      }),
+    );
+    stamped.sort((a, b) => b.mtime - a.mtime);
+    for (const { name } of stamped.slice(MAX_JOBS)) {
+      await unlink(path.join(config.jobsDir, name)).catch(() => {});
+    }
+  } catch {
+    /* no jobs directory yet */
+  }
+}
+
 export function createJob(input: {
   imagePath: string;
   imageMime: string;
@@ -89,13 +141,15 @@ export function createJob(input: {
   };
   evictOldJobs();
   jobs.set(id, job);
+  void persist(job);
   void runJob(job, beats, input.imageMime);
   return toView(job);
 }
 
 /** Finished jobs are only kept for the history list, so drop the oldest first. */
+const MAX_JOBS = 100;
+
 function evictOldJobs() {
-  const MAX_JOBS = 100;
   if (jobs.size < MAX_JOBS) return;
   const finished = [...jobs.values()]
     .filter((job) => job.status === 'done' || job.status === 'error')
@@ -106,8 +160,10 @@ function evictOldJobs() {
   }
 }
 
-export function getJob(id: string): JobView | null {
-  const job = jobs.get(id);
+export async function getJob(id: string): Promise<JobView | null> {
+  // A job this pod is running is authoritative; otherwise read the shared copy
+  // another replica wrote.
+  const job = jobs.get(id) ?? (await readPersisted(id));
   return job ? toView(job) : null;
 }
 
@@ -119,6 +175,7 @@ function toView(job: StoredJob): JobView {
 function log(job: StoredJob, text: string, kind: JobView['log'][number]['kind'] = 'info') {
   job.log.push({ at: new Date().toISOString(), text, kind });
   if (job.log.length > 120) job.log.shift();
+  void persist(job);
 }
 
 async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
@@ -135,6 +192,7 @@ async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
       () => log(job, 'Could not publish photo publicly — upload-only providers will still work', 'warn'),
     );
 
+    await persist(job);
     const clips: (string | null)[] = new Array(beats.length).fill(null);
 
     for (let index = 0; index < beats.length; index += 1) {
@@ -229,15 +287,32 @@ async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
     job.downloadUrl = `/media/renders/${job.id}.mp4?download=1`;
     job.finishedAt = Date.now();
     log(job, `Done in ${((Date.now() - started) / 1000).toFixed(1)}s — ${TOTAL_SECONDS}s video ready`, 'ok');
+    await persist(job);
   } catch (err) {
     job.status = 'error';
     job.error = err instanceof Error ? err.message : String(err);
     log(job, `Render failed: ${job.error}`, 'error');
+    await persist(job);
   } finally {
     active.delete(job.id);
   }
 }
 
-export function listJobs(): JobView[] {
-  return [...jobs.values()].sort((a, b) => b.createdAt - a.createdAt).slice(0, 20).map(toView);
+export async function listJobs(): Promise<JobView[]> {
+  const merged = new Map<string, StoredJob>(jobs);
+  try {
+    const names = (await readdir(config.jobsDir)).filter((name) => name.endsWith('.json'));
+    for (const name of names) {
+      const id = name.slice(0, -5);
+      if (merged.has(id)) continue;
+      const job = await readPersisted(id);
+      if (job) merged.set(id, job);
+    }
+  } catch {
+    /* no jobs directory yet */
+  }
+  return [...merged.values()]
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, 20)
+    .map(toView);
 }
