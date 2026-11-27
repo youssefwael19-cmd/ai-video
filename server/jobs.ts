@@ -58,10 +58,34 @@ export interface JobView {
 interface StoredJob extends JobView {
   /** Last time this pod wrote the job, used to spot a render orphaned by a restart. */
   updatedAt?: number;
+  /**
+   * Last time the pod running the render checked in. A live render re-stamps it
+   * every few seconds, so silence here means the process behind the job is gone.
+   */
+  heartbeatAt?: number;
   imagePath: string;
   /** The app's own public origin, used to serve the photo to URL-only providers. */
   publicBase?: string;
 }
+
+const UNFINISHED: JobStatus[] = ['queued', 'running', 'composing'];
+
+/** How often a render re-stamps its job file while it is still working. */
+const HEARTBEAT_MS = 10_000;
+/**
+ * Silence longer than this means nothing is driving the job any more: the pod
+ * was killed mid-render (a rollout, an OOM kill, a restart). Nothing legitimately
+ * goes this long without a write — a beat in flight still logs and heartbeats.
+ */
+const STALE_MS = 60_000;
+/** No 15s video is worth waiting longer than this; past it the job is declared lost. */
+const JOB_CEILING_MS = 20 * 60_000;
+/**
+ * One beat may walk the whole provider pool, and each attempt or Space render
+ * can take minutes. Past this the beat is handed to the local motion pass so a
+ * single wedged provider cannot hold a whole render open.
+ */
+const BEAT_CEILING_MS = 6 * 60_000;
 
 const jobs = new Map<string, StoredJob>();
 const active = new Set<string>();
@@ -72,7 +96,9 @@ const active = new Set<string>();
  * Every change is mirrored to DATA_DIR/jobs, which all replicas share.
  */
 async function persist(job: StoredJob): Promise<void> {
-  job.updatedAt = Date.now();
+  const now = Date.now();
+  job.updatedAt = now;
+  job.heartbeatAt = now;
   const file = path.join(config.jobsDir, `${job.id}.json`);
   // Replicas can share a PID, so a pid-based temp name collides when two pods
   // write the same job and the second rename finds the file already moved.
@@ -161,7 +187,9 @@ export function createJob(input: {
   evictOldJobs();
   jobs.set(id, job);
   void persist(job);
-  void runJob(job, beats, input.imageMime);
+  // Last line of defence: if the render ever throws outside its own try/catch
+  // the job must still leave "queued" instead of hanging there.
+  void runJob(job, beats, input.imageMime).catch((err) => failJob(job, err));
   return toView(job);
 }
 
@@ -179,26 +207,48 @@ function evictOldJobs() {
   }
 }
 
-/** A pod that is killed mid-render leaves its job marked running forever. */
+/**
+ * A pod that is killed mid-render leaves its job marked running. The job file
+ * stops being stamped at that moment, so a job that has been silent for a while
+ * is closed out here — on whichever replica the next poll lands on — instead of
+ * sitting at "running" forever with no process behind it.
+ */
 function reconcile(job: StoredJob): StoredJob {
-  const unfinished = job.status === 'queued' || job.status === 'running' || job.status === 'composing';
-  const stale = Date.now() - (job.updatedAt ?? job.createdAt) > 15 * 60_000;
-  if (unfinished && stale) {
-    return {
-      ...job,
-      status: 'error',
-      error: 'The render was interrupted (the app restarted mid-job) — start it again',
-      finishedAt: Date.now(),
-    };
-  }
-  return job;
+  if (!UNFINISHED.includes(job.status)) return job;
+  const now = Date.now();
+  const lastSeen = Math.max(job.heartbeatAt ?? 0, job.updatedAt ?? 0, job.createdAt);
+  const silentFor = now - lastSeen;
+  const overran = now - job.createdAt > JOB_CEILING_MS;
+  if (silentFor <= STALE_MS && !overran) return job;
+
+  const reason = silentFor > STALE_MS
+    ? 'the render stopped reporting in, so the app was restarted or the render was killed'
+    : `the render was still running after ${Math.round(JOB_CEILING_MS / 60_000)} minutes`;
+  const error = `Render interrupted — ${reason}. Start it again.`;
+  const interrupted: StoredJob = {
+    ...job,
+    status: 'error',
+    error,
+    progress: 100,
+    finishedAt: now,
+    log: [
+      ...job.log,
+      { at: new Date(now).toISOString(), text: error, kind: 'error' as const },
+    ].slice(-120),
+  };
+  // Write it back so every replica and every later poll sees the same verdict
+  // instead of re-deciding whether the job is dead.
+  void persist(interrupted);
+  return interrupted;
 }
 
 export async function getJob(id: string): Promise<JobView | null> {
   // A job this pod is running is authoritative; otherwise read the shared copy
   // another replica wrote.
-  const job = jobs.get(id) ?? (await readPersisted(id).then((j) => (j ? reconcile(j) : null)));
-  return job ? toView(job) : null;
+  const local = jobs.get(id);
+  if (local) return toView(active.has(id) ? local : reconcile(local));
+  const stored = await readPersisted(id);
+  return stored ? toView(reconcile(stored)) : null;
 }
 
 function toView(job: StoredJob): JobView {
@@ -212,10 +262,38 @@ function log(job: StoredJob, text: string, kind: JobView['log'][number]['kind'] 
   void persist(job);
 }
 
+/** Close a job out as failed. Safe to call twice: the second call is a no-op. */
+async function failJob(job: StoredJob, err: unknown): Promise<void> {
+  if (job.status === 'done' || job.status === 'error') return;
+  job.status = 'error';
+  job.progress = 100;
+  job.error = err instanceof Error ? err.message : String(err);
+  job.finishedAt = Date.now();
+  log(job, `Render failed: ${job.error}`, 'error');
+  await persist(job);
+}
+
+/** Reject once `ms` passes, so one wedged provider cannot hold a beat open. */
+function deadline<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expiry = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, expiry]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
   if (active.has(job.id)) return;
   active.add(job.id);
   const started = Date.now();
+  // The heartbeat is what lets any replica tell an in-flight render from one
+  // whose process died; without it a killed pod's job would look alive forever.
+  const heartbeat = setInterval(() => {
+    if (job.status === 'done' || job.status === 'error') return;
+    void persist(job);
+  }, HEARTBEAT_MS);
 
   try {
     job.status = 'running';
@@ -230,6 +308,12 @@ async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
     const clips: (string | null)[] = new Array(beats.length).fill(null);
 
     for (let index = 0; index < beats.length; index += 1) {
+      // Each beat is bounded, but three near-ceiling beats would still outlast
+      // the whole job; give up here rather than leaving a render that can never
+      // finish in the queue.
+      if (Date.now() - started > JOB_CEILING_MS) {
+        throw new Error(`The render passed ${Math.round(JOB_CEILING_MS / 60_000)} minutes without finishing`);
+      }
       const beat = beats[index];
       const segment = job.segments[index];
       segment.status = 'running';
@@ -248,24 +332,29 @@ async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
 
       let successMs = 0;
       try {
-        const { output, provider } = await generateBeat(request, (attempt: Attempt) => {
-          if (attempt.skipped) {
-            log(job, `${beat.label} → ${attempt.label} skipped: ${attempt.error ?? 'cooling down'}`, 'info');
-            return;
-          }
-          segment.attempts += 1;
-          if (attempt.ok) {
-            // Logged once the clip is probed: the size it really came back at
-            // is what shows a provider serving a cheaper tier than requested.
-            successMs = attempt.ms;
-            return;
-          }
-          log(
-            job,
-            `${beat.label} → ${attempt.label} declined: ${attempt.error ?? 'unknown error'} — trying next provider`,
-            'warn',
-          );
-        });
+        const clip = deadline(
+          generateBeat(request, (attempt: Attempt) => {
+            if (attempt.skipped) {
+              log(job, `${beat.label} → ${attempt.label} skipped: ${attempt.error ?? 'cooling down'}`, 'info');
+              return;
+            }
+            segment.attempts += 1;
+            if (attempt.ok) {
+              // Logged once the clip is probed: the size it really came back at
+              // is what shows a provider serving a cheaper tier than requested.
+              successMs = attempt.ms;
+              return;
+            }
+            log(
+              job,
+              `${beat.label} → ${attempt.label} declined: ${attempt.error ?? 'unknown error'} — trying next provider`,
+              'warn',
+            );
+          }),
+          BEAT_CEILING_MS,
+          'No provider finished this beat in time',
+        );
+        const { output, provider } = await clip;
         // Reported by every provider, including Atmee stepping down to 480p
         // when credits are short, so a quality drop is visible in the job.
         const info = await probeMedia(output.videoPath).catch(() => null);
@@ -333,7 +422,10 @@ async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
         ? `Compositing ${beats.length - missing.length} AI beats + ${missing.length} local motion beat(s) into a 15s timeline…`
         : 'Compositing beats into a 15s timeline…',
     );
-    await composeSegments({ segments: clips as string[], aspect: job.aspect, outputPath: output });
+    // Beats the local pass filled already move the photograph themselves, so
+    // the finishing move is only layered onto the AI ones.
+    const kinds = beats.map((beat, index) => (missing.includes(index) ? null : beat.kind));
+    await composeSegments({ segments: clips as string[], aspect: job.aspect, outputPath: output, kinds });
 
     job.progress = 100;
     job.status = 'done';
@@ -343,11 +435,9 @@ async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
     log(job, `Done in ${((Date.now() - started) / 1000).toFixed(1)}s — ${TOTAL_SECONDS}s video ready`, 'ok');
     await persist(job);
   } catch (err) {
-    job.status = 'error';
-    job.error = err instanceof Error ? err.message : String(err);
-    log(job, `Render failed: ${job.error}`, 'error');
-    await persist(job);
+    await failJob(job, err);
   } finally {
+    clearInterval(heartbeat);
     active.delete(job.id);
   }
 }

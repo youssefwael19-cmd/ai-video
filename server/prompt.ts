@@ -15,6 +15,8 @@ export interface BeatPlan {
   label: string;
   /** The one motion this shot performs, phrased for an i2v model. */
   motion: string;
+  /** Light character for this shot, so the three beats do not share one look. */
+  light: string;
 }
 
 export const BEAUTY = {
@@ -42,32 +44,36 @@ const BEATS: BeatPlan[] = [
     kind: 'hero',
     label: 'Hero push-in',
     motion:
-      'the camera drifts forward very slowly toward the product on a smooth dolly, the product stays perfectly still and centred',
+      'the camera dollies slowly forward toward the product, medium framing, the product stays perfectly still and centred',
+    light: 'a soft key light from the upper left, warm highlights and a gentle falloff into shadow',
   },
   {
     kind: 'detail',
-    label: 'Texture detail',
-    // A macro fly-around makes these models rebuild the product from the wrong
-    // side, which bends the silhouette and melts the label. Moving the light
-    // instead reveals the same material detail without inventing any geometry.
+    label: 'Surface macro',
+    // Framing does the work here instead of an orbit. A fly-around makes these
+    // models rebuild a side of the product they have never seen, which bent the
+    // silhouette and painted a label that was not on the photo; a tight crop of
+    // the front face plus a drift keeps every pixel of the real product.
     motion:
-      'a soft specular highlight travels slowly across the surface of the product while the camera eases in slightly, revealing the finish and texture, the product itself does not change shape',
+      'a tight close-up of the product surface, filling most of the frame, the camera drifting slowly sideways past the front face while a bright highlight sweeps across the finish',
+    light: 'a narrow raking light with strong specular glints on the surface and deep contrast',
   },
   {
     kind: 'rotation',
-    label: 'Cap highlight',
-    // Even a few degrees of turn asks the model for a side it has never seen:
-    // the black bottle came back amber, carrying a white label that was not on
-    // the photo. Raking light across the cap reads as another view without
-    // handing the model anything to invent.
+    label: 'Angle rise',
+    // The camera moves on the vertical axis only: a tilt never asks the model
+    // for a side it has not seen, but it reads as a completely different shot
+    // next to the push-in.
     motion:
-      'a highlight rakes slowly across the cap and the front face of the product, revealing the material finish, while the product keeps exactly the same front view',
+      'the camera rises slowly from a low angle, tilting upward from the base of the product toward its top, the front face staying in view the whole time',
+    light: 'a hard rim of light along one edge, the rest of the product falling into shadow',
   },
   {
     kind: 'reveal',
     label: 'Slow reveal',
     motion:
-      'the camera eases back very slowly to show a little more of the product and the surface it stands on, ending on a clean balanced frame',
+      'the camera eases back slowly to a slightly wider framing that shows the surface the product stands on, ending on a clean balanced frame',
+    light: 'soft even light with a faint warm glow behind the product',
   },
 ];
 
@@ -119,14 +125,16 @@ export function buildBeatPrompt(beat: BeatPlan, brief: string, style: StylePrese
   return [
     `${beat.motion}.`,
     subject,
-    `${STYLE_LOOK[style]}.`,
+    `${STYLE_LOOK[style]}, ${beat.light}.`,
     // Do not name the label, its wording or any text here. Asking these models
     // to "keep the label identical" is read as "render a label", and every free
     // model answered by painting fresh lettering onto the product. Plain
-    // "do not move" language holds the shape far better.
-    'The product keeps exactly the same framing, silhouette, colour and proportions as the reference photo. It does not move, turn, open or change shape at any point.',
+    // "do not move" language holds the shape far better. Framing is deliberately
+    // left out of this guard: each beat frames the product differently, and
+    // calling for "the same framing" lashed all three beats to one shot.
+    'The product keeps exactly the same silhouette, colour, proportions and details as the reference photo. It does not move, turn, open or change shape at any point.',
     'Keep the background and the shadows as they are in the reference photo.',
-    'The camera movement is slow and small, one continuous shot, photorealistic, crisp sharp focus, high detail.',
+    'One continuous shot, slow smooth camera movement, photorealistic, crisp sharp focus, high detail.',
   ]
     .filter(Boolean)
     .join(' ');

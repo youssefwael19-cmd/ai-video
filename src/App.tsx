@@ -76,6 +76,13 @@ export default function App() {
     if (!running || !job) return;
     const id = setInterval(async () => {
       const res = await fetch(`/api/jobs/${job.id}`);
+      if (res.status === 404) {
+        // The job is gone (pruned, or the volume was reset) — stop claiming it
+        // is still rendering.
+        setBusy(false);
+        setError('That render is no longer on the server — start a new one.');
+        return;
+      }
       if (!res.ok) return;
       const next = (await res.json()) as JobView;
       setJob(next);
@@ -414,6 +421,8 @@ export default function App() {
                 ))}
               </div>
 
+              {job?.status === 'error' && job.error && <p className="error">{job.error}</p>}
+
               {job && (
                 <div className="stage-actions">
                   {job.videoUrl && (
@@ -710,8 +719,8 @@ function testTone(result: KeyTestResult): 'ok' | 'warn' | 'bad' {
 function defaultBeats(): SegmentView[] {
   return [
     { index: 0, label: 'Hero push-in', prompt: '', status: 'pending', attempts: 0 },
-    { index: 1, label: 'Detail glide', prompt: '', status: 'pending', attempts: 0 },
-    { index: 2, label: 'Hero rotation', prompt: '', status: 'pending', attempts: 0 },
+    { index: 1, label: 'Surface macro', prompt: '', status: 'pending', attempts: 0 },
+    { index: 2, label: 'Slow reveal', prompt: '', status: 'pending', attempts: 0 },
   ];
 }
 

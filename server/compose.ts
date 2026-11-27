@@ -81,18 +81,37 @@ export async function pruneDataDir(): Promise<number> {
   return removed;
 }
 
-function run(args: string[]): Promise<{ stdout: string; stderr: string }> {
+/**
+ * Every ffmpeg call is bounded. A single frame of x264 takes milliseconds, so
+ * a call still running after five minutes is wedged; killing it turns that into
+ * a failed job instead of a render that stays "running" forever.
+ */
+const FFMPEG_TIMEOUT_MS = 5 * 60_000;
+
+function run(args: string[], timeoutMs = FFMPEG_TIMEOUT_MS): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(ffmpegBin, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, timeoutMs);
     child.stdout.on('data', (d) => (stdout += d.toString()));
     child.stderr.on('data', (d) => {
       stderr += d.toString();
       if (stderr.length > 200_000) stderr = stderr.slice(-100_000);
     });
-    child.on('error', reject);
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
     child.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) {
+        return reject(new Error(`ffmpeg gave no result after ${timeoutMs / 60_000} minutes`));
+      }
       if (code === 0) return resolve({ stdout, stderr });
       reject(new Error(`ffmpeg exited with ${code}: ${stderr.slice(-600)}`));
     });
@@ -137,6 +156,12 @@ export interface ComposeInput {
   segments: string[];
   aspect: Aspect;
   outputPath: string;
+  /**
+   * Shot kind per segment, or `null` for a locally animated beat (which already
+   * performs its own camera move). Used to give each AI beat a distinct
+   * finishing move at compose time.
+   */
+  kinds?: (BeatKind | null)[];
 }
 
 /**
@@ -145,7 +170,12 @@ export interface ComposeInput {
  * instead of being stretched into slow motion; only the ends of the finished
  * video fade.
  */
-export async function composeSegments({ segments, aspect, outputPath }: ComposeInput): Promise<number> {
+export async function composeSegments({
+  segments,
+  aspect,
+  outputPath,
+  kinds,
+}: ComposeInput): Promise<number> {
   const { width, height } = sizeFor(aspect);
   const empty: MediaInfo = { seconds: 0, width: 0, height: 0 };
   const infos = await Promise.all(segments.map((file) => probeMedia(file).catch(() => empty)));
@@ -171,6 +201,13 @@ export async function composeSegments({ segments, aspect, outputPath }: ComposeI
     const fadeIn = index === 0 ? ',fade=t=in:st=0:d=0.4' : '';
     const fadeOut =
       index === segments.length - 1 ? `,fade=t=out:st=${BEAT_SECONDS - 0.4}:d=0.4` : '';
+    // The framing move runs after the clip is normalised to 25 fps, so `on`
+    // counts the beats' own frames instead of the provider's 24 fps ones.
+    const clipFrames = Math.max(1, Math.min(BEAT_SECONDS * FPS, Math.round(info.seconds * FPS) || BEAT_SECONDS * FPS));
+    const kind = kinds?.[index] ?? null;
+    const framing = kind
+      ? `,${zoomPan(FINISHING[kind] ?? FINISHING.hero, clipFrames, `${width}x${height}`)}`
+      : '';
     const beatPath = path.join(workDir, `${path.basename(outputPath, '.mp4')}-beat${index}.mp4`);
     // A short clip holds its last frame for the rest of its slot: tpad clones it
     // so nothing is slowed down to fill the slot. Neither `fps` nor `setpts` may
@@ -182,7 +219,7 @@ export async function composeSegments({ segments, aspect, outputPath }: ComposeI
     const filter =
       `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height}` +
       `${grade}${sharpen},tpad=stop_mode=clone:stop_duration=${BEAT_SECONDS},` +
-      `fps=${FPS},trim=end_frame=${BEAT_SECONDS * FPS},setpts=N/(${FPS}*TB),setsar=1${fadeIn}${fadeOut}[v]`;
+      `fps=${FPS},trim=end_frame=${BEAT_SECONDS * FPS},setpts=N/(${FPS}*TB),setsar=1${framing}${fadeIn}${fadeOut}[v]`;
 
     await run([
       '-y',
@@ -254,20 +291,43 @@ const MOVES: Record<BeatKind, { from: number; to: number; pan: 'center' | 'acros
 };
 
 /**
+ * Finishing move for an AI beat. Every free model answers "camera slowly pushes
+ * in" with nearly the same shot, so three beats cut together read as one shot
+ * entered three times. A small crop move per beat — a push, a lateral drift, a
+ * vertical drift, a pull-back — separates the cuts even when the provider hands
+ * back something close to the reference framing.
+ */
+const FINISHING: Record<BeatKind, { from: number; to: number; pan: 'center' | 'across' | 'rise' }> = {
+  hero: { from: 1, to: 1.05, pan: 'center' },
+  detail: { from: 1.14, to: 1.2, pan: 'across' },
+  rotation: { from: 1.1, to: 1.1, pan: 'rise' },
+  reveal: { from: 1.06, to: 1, pan: 'center' },
+};
+
+interface Move {
+  from: number;
+  to: number;
+  pan: 'center' | 'across' | 'rise';
+}
+
+/**
  * Ease-out so the move settles instead of stopping dead. `on` is the output
  * frame number; zoompan reads z/x/y per frame, and the quotes keep the commas
- * inside min()/pow() from being read as filter separators.
+ * inside min()/pow() from being read as filter separators. `d=1` makes zoompan
+ * emit one frame per input frame, and `on` keeps counting across those frames,
+ * which is what lets the same expression animate a still and a real clip.
  */
-function zoomPan(kind: BeatKind, frames: number): string {
-  const move = MOVES[kind] ?? MOVES.hero;
+function zoomPan(move: Move, frames: number, size: string): string {
   const last = Math.max(1, frames - 1);
   const ease = `(1-pow(1-min(on/${last},1),2))`;
   const zoom = `${move.from}+(${move.to}-${move.from})*${ease}`;
   const x =
     move.pan === 'center' ? 'iw/2-(iw/zoom/2)' : `(iw-iw/zoom)*(0.12+0.76*${ease})`;
   const y =
-    move.pan === 'center' ? 'ih/2-(ih/zoom/2)' : `(ih-ih/zoom)*(0.35+0.3*${ease})`;
-  return `zoompan=z='${zoom}':x='${x}':y='${y}'`;
+    move.pan === 'rise'
+      ? `(ih-ih/zoom)*(0.85-0.7*${ease})`
+      : 'ih/2-(ih/zoom/2)';
+  return `zoompan=z='${zoom}':x='${x}':y='${y}':d=1:s=${size}:fps=${FPS}`;
 }
 
 /**
@@ -292,7 +352,7 @@ export async function renderLocalSegment({
   const w2 = width * 2;
   const h2 = height * 2;
   const frames = BEAT_SECONDS * FPS;
-  const move = zoomPan(kind, frames);
+  const move = zoomPan(MOVES[kind] ?? MOVES.hero, frames, `${width}x${height}`);
 
   // d=1: the looped still already supplies one input frame per output frame, so
   // letting zoompan emit `frames` frames per input would finish the move early
@@ -300,8 +360,7 @@ export async function renderLocalSegment({
   // the end-of-video fades are left to composeSegments.
   const filter =
     `[0:v]scale=${w2}:${h2}:force_original_aspect_ratio=increase:flags=lanczos,crop=${w2}:${h2},` +
-    `${move}:d=1:s=${width}x${height}:fps=${FPS},` +
-    `trim=end_frame=${frames},setpts=N/(${FPS}*TB)[v]`;
+    `${move},trim=end_frame=${frames},setpts=N/(${FPS}*TB)[v]`;
 
   await run([
     '-y',
