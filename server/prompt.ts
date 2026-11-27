@@ -45,7 +45,7 @@ const BEATS: BeatPlan[] = [
     label: 'Hero push-in',
     motion:
       'the camera dollies slowly forward toward the product, medium framing, the product stays perfectly still and centred',
-    light: 'a soft key light from the upper left, warm highlights and a gentle falloff into shadow',
+    light: 'a clean specular highlight along the top edge of the product',
   },
   {
     kind: 'detail',
@@ -56,7 +56,7 @@ const BEATS: BeatPlan[] = [
     // the front face plus a drift keeps every pixel of the real product.
     motion:
       'a tight close-up of the product surface, filling most of the frame, the camera drifting slowly sideways past the front face while a bright highlight sweeps across the finish',
-    light: 'a narrow raking light with strong specular glints on the surface and deep contrast',
+    light: 'strong specular glints on the finish and deep contrast',
   },
   {
     kind: 'rotation',
@@ -66,14 +66,14 @@ const BEATS: BeatPlan[] = [
     // next to the push-in.
     motion:
       'the camera rises slowly from a low angle, tilting upward from the base of the product toward its top, the front face staying in view the whole time',
-    light: 'a hard rim of light along one edge, the rest of the product falling into shadow',
+    light: 'a hard rim of light along one edge while the rest of the product falls into shadow',
   },
   {
     kind: 'reveal',
     label: 'Slow reveal',
     motion:
       'the camera eases back slowly to a slightly wider framing that shows the surface the product stands on, ending on a clean balanced frame',
-    light: 'soft even light with a faint warm glow behind the product',
+    light: 'the light stays soft and even across the whole frame',
   },
 ];
 
