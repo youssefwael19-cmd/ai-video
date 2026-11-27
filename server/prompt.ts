@@ -1,84 +1,123 @@
 import type { StylePreset } from './providers/types.js';
 
+/**
+ * Product-video prompts for image-to-video models. Every model in the free pool
+ * (Wan 2.2, LTX, Hailuo, Atmee) is conditioned on a single reference photo, so
+ * the prompt has to do two jobs: describe one clear motion, and tell the model
+ * to leave the product itself alone. Prompts that only describe a camera move
+ * let the model invent geometry, which is what made labels drift and logos
+ * melt on the softer models.
+ */
+export type BeatKind = 'hero' | 'detail' | 'rotation' | 'reveal';
+
 export interface BeatPlan {
-  key: 'hero' | 'detail' | 'rotation';
+  kind: BeatKind;
   label: string;
+  /** The one motion this shot performs, phrased for an i2v model. */
   motion: string;
 }
 
 export const BEAUTY = {
   negative:
-    'warped product shape, melted text, distorted logo, extra objects, hands, watermark, subtitles, flickering, low quality, blurry',
+    'warped product shape, melted text, distorted logo, extra objects, hands, watermark, subtitles, flickering, low quality, blurry, camera shake, morphing product, duplicate product, cuts, scene change',
 };
 
+/**
+ * Look presets. These are deliberately concrete: colour, light direction and
+ * surface behaviour reach the model far more reliably than adjectives like
+ * "premium".
+ */
 const STYLE_LOOK: Record<StylePreset, string> = {
   cinematic:
-    'moody cinematic lighting, shallow depth of field, crisp focus, premium commercial feel, smooth camera moves, product reveals with intention',
+    'moody low-key lighting with a soft key from the upper left, gentle falloff into shadow, shallow depth of field, warm highlights and cool shadows, filmic contrast',
   studio:
-    'clean seamless studio backdrop, large soft box lighting, crisp product photography, neutral shadows, product stays perfectly centered',
-  bold: 'vivid saturated backdrop, punchy contrast, energetic commercial lighting, high fashion retail feel, dynamic camera moves',
+    'clean seamless studio backdrop in soft grey, large soft-box light from the front, crisp specular highlight along the product edge, even neutral shadows, catalogue photography',
+  bold: 'vivid saturated colour backdrop, hard punchy side light with a strong rim highlight, glossy reflections, high contrast, energetic retail advertising',
   lifestyle:
-    'warm natural window light, styled home set, soft shadows, editorial lifestyle photography, gentle product panning',
+    'warm natural window light from the side, soft realistic shadows, styled surface with a few props far out of focus, editorial lifestyle photography, gentle falloff',
 };
 
-/** Smart beat planning: picks the best motion for the product type and brief. */
-export interface BeatPlan {
-  key: 'hero' | 'detail' | 'rotation';
-  label: string;
-  motion: string;
-}
-
-export const BEATS: BeatPlan[] = [
+const BEATS: BeatPlan[] = [
   {
-    key: 'hero',
+    kind: 'hero',
     label: 'Hero push-in',
     motion:
-      'the camera pushes in slowly toward the product, subtle parallax, product perfectly still and centered',
+      'the camera drifts forward very slowly toward the product on a smooth dolly, the product stays perfectly still and centred',
   },
   {
-    key: 'detail',
-    label: 'Detail glide',
+    kind: 'detail',
+    label: 'Light sweep',
+    // A macro fly-around makes these models rebuild the product from the wrong
+    // side, which bends the silhouette and melts the label. Moving the light
+    // instead reveals the same material detail without inventing any geometry.
     motion:
-      'a smooth macro glide across the surface of the product revealing material texture and edges, shallow focus',
+      'a soft specular highlight travels slowly across the surface of the product while the camera eases in slightly, revealing the finish and texture, the product itself does not change shape',
   },
   {
-    key: 'rotation',
-    label: 'Hero rotation',
+    kind: 'rotation',
+    label: 'Slight turn',
     motion:
-      'the product rotates slowly on a studio pedestal, light sweeping across it, background softly blurred',
+      'the product turns just a few degrees on its base while a soft highlight sweeps across the front of it, the background and lighting stay unchanged',
+  },
+  {
+    kind: 'reveal',
+    label: 'Slow reveal',
+    motion:
+      'the camera eases back very slowly to show a little more of the product and the surface it stands on, ending on a clean balanced frame',
   },
 ];
 
-/** Select beats based on the brief and style - makes the video smarter about what to show. */
+const byKind = (kind: BeatKind): BeatPlan => BEATS.find((beat) => beat.kind === kind) ?? BEATS[0];
+
+/** Shot order per look, used to pick which three beats a brief gets. */
+const PRIORITY: Record<StylePreset, BeatKind[]> = {
+  cinematic: ['hero', 'detail', 'reveal', 'rotation'],
+  studio: ['hero', 'rotation', 'detail', 'reveal'],
+  bold: ['hero', 'rotation', 'reveal', 'detail'],
+  lifestyle: ['detail', 'hero', 'reveal', 'rotation'],
+};
+
+/**
+ * Choose the three shots for a brief. The brief only *adds* a shot type — the
+ * list is then topped up from the style's own priority order, so a brief that
+ * mentions nothing in particular still gets three distinct beats and the render
+ * is always the advertised 15 seconds. (An earlier version returned two beats
+ * for some briefs, which quietly produced a 10 second video.)
+ */
 export function planBeats(brief: string, style: StylePreset): BeatPlan[] {
-  const briefL = brief.trim().toLowerCase();
-  // If brief mentions specific features, create detail-oriented beats
-  if (/\|\b(material|texture|detail|surface|close-up|zoom)\b/.test(briefL)) {
-    return [BEATS[1], BEATS[0]]; // detail glide first, then hero push-in
+  const text = brief.toLowerCase();
+  const picked = new Set<BeatKind>(['hero']);
+
+  if (/detail|texture|close[- ]?up|macro|material|fabric|stitch|emboss|engrav/.test(text)) {
+    picked.add('detail');
   }
-  // If brief mentions rotation or 360 view
-  if (/\|\b(rotate|turn|360|reveal all|all sides)\b/.test(briefL)) {
-    return [BEATS[0], BEATS[2]]; // hero push-in, then hero rotation
+  if (/rotat|spin|360|turn|all sides|every angle|angles/.test(text)) {
+    picked.add('rotation');
   }
-  // Style-specific ordering
-  if (style === 'bold') {
-    return [BEATS[0], BEATS[2], BEATS[1]]; // hero, rotation, detail for maximum impact
+  if (/reveal|wide|room|scene|setting|environment|lifestyle|table|shelf|kitchen|bathroom|gift/.test(text)) {
+    picked.add('reveal');
   }
-  if (style === 'lifestyle') {
-    return [BEATS[1], BEATS[0]]; // detail, hero for storytelling
+
+  for (const kind of PRIORITY[style]) {
+    if (picked.size >= 3) break;
+    picked.add(kind);
   }
-  // Default: hero, detail, rotation
-  return [BEATS[0], BEATS[1], BEATS[2]];
+
+  return PRIORITY[style].filter((kind) => picked.has(kind)).slice(0, 3).map(byKind);
 }
 
+/**
+ * Build the prompt for one beat. Kept short on purpose: Wan and LTX both weight
+ * the front of the prompt most, and a wall of text makes them wander.
+ */
 export function buildBeatPrompt(beat: BeatPlan, brief: string, style: StylePreset): string {
-  const description = brief.trim() ? `The product is: ${brief.trim()}.` : '';
+  const subject = brief.trim() ? `The subject is ${brief.trim()}.` : '';
   return [
     `${beat.motion}.`,
-    description,
-    STYLE_LOOK[style] + '.',
-    'Keep the product identical to the reference photo — same shape, colour, label and proportions.',
-    'Smooth steady motion, no cuts, no scene changes.',
+    subject,
+    `${STYLE_LOOK[style]}.`,
+    'The product stays identical to the reference photo — same silhouette, colour, label, texture and proportions — and never turns around, unfolds or changes shape.',
+    'The camera movement is slow and small, one continuous shot, photorealistic, crisp sharp focus, high detail.',
   ]
     .filter(Boolean)
     .join(' ');

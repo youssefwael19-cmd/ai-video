@@ -3,7 +3,8 @@
 One product photo in, one 15-second product video out. Three 5-second beats are
 generated across a pool of free AI video providers, then stitched into an exact
 15.0s h.264 MP4 with ffmpeg. Beats that no provider can render are filled by a
-local Ken Burns motion pass, so a render always completes.
+local cinematic motion pass — the same three shots, framed and moved in ffmpeg —
+so a render always completes without a paid key.
 
 ## Run locally
 

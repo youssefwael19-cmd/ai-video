@@ -508,8 +508,9 @@ export default function App() {
             )}
             {state?.localFallback && (
               <p className="setup-note">
-                Last resort: <strong>local motion pass</strong> — an ffmpeg Ken Burns render of your photo. It is
-                only used when every AI provider declines, so the app always returns a 15s file.
+                Last resort: <strong>local motion pass</strong> — an ffmpeg render of your photo using the same three
+                shots and camera moves. It is only used when every AI provider declines, so the app always returns a
+                15s file.
               </p>
             )}
           </section>

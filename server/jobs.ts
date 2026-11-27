@@ -310,7 +310,7 @@ async function runJob(job: StoredJob, beats: BeatPlan[], imageMime: string) {
         await renderLocalSegment({
           imagePath: job.imagePath,
           aspect: job.aspect,
-          index,
+          kind: beats[index].kind,
           outputPath: dest,
         });
         clips[index] = dest;

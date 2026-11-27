@@ -33,24 +33,13 @@ const filedata = (p: string): FileData => ({ path: p, meta: { _type: 'gradio.Fil
 
 const NEGATIVE = 'blurry, distorted product shape, warped logo, extra limbs, watermark, flickering, text artifacts';
 
+/**
+ * Ordered by output quality, because the first Space that answers wins the
+ * beat. The 14B Wan checkpoint resolves fine surface detail (edges, embossing,
+ * label type) that the fp8 and Lightning builds soften, so it gets first pick
+ * and the faster builds are there to keep a beat alive when it is queued out.
+ */
 const SPACES: SpaceSpec[] = [
-  {
-    space: 'zerogpu-aoti/wan2-2-fp8da-aoti-faster',
-    apiName: 'generate_video',
-    model: 'Wan 2.2 I2V (fp8, fast)',
-    maxSeconds: 5,
-    buildInputs: (req, image, seconds) => [
-      image,
-      req.prompt,
-      6,
-      NEGATIVE,
-      seconds,
-      1,
-      1,
-      req.seed,
-      false,
-    ],
-  },
   {
     space: 'Upsampler/wan-2-2-14b-image-to-video',
     apiName: 'generate_video',
@@ -67,6 +56,52 @@ const SPACES: SpaceSpec[] = [
       req.seed,
       false,
       null,
+    ],
+  },
+  {
+    space: 'Saravutw/WAN2.2_I2V_LIGHTNING_4-8step_custom',
+    apiName: 'generate_video',
+    model: 'Wan 2.2 Lightning 4-step I2V',
+    maxSeconds: 8,
+    // 16 positional inputs, in the order the Space declares them; the values
+    // that are not ours to choose reuse the Space's own defaults, checked
+    // against its live config (steps 4, guidance 1/1, quality 5, UniPCMultistep,
+    // flow shift 3). 32 fps is the fluidity option: Wan's native 16 fps judders
+    // on a slow push-in once it is retimed to the 25 fps timeline.
+    buildInputs: (req, image, seconds) => [
+      image,
+      null,
+      req.prompt,
+      4,
+      NEGATIVE,
+      seconds,
+      1,
+      1,
+      req.seed,
+      false,
+      5,
+      'UniPCMultistep',
+      3,
+      32,
+      false,
+      false,
+    ],
+  },
+  {
+    space: 'zerogpu-aoti/wan2-2-fp8da-aoti-faster',
+    apiName: 'generate_video',
+    model: 'Wan 2.2 I2V (fp8, fast)',
+    maxSeconds: 5,
+    buildInputs: (req, image, seconds) => [
+      image,
+      req.prompt,
+      6,
+      NEGATIVE,
+      seconds,
+      1,
+      1,
+      req.seed,
+      false,
     ],
   },
   {
@@ -169,8 +204,8 @@ export function createHuggingFaceProviders(hfToken: string): Provider[] {
       id: 'hf:spaces',
       label: 'Hugging Face Spaces',
       service: 'Hugging Face Spaces',
-      model: 'Wan 2.2 + LTX-Video · 4 Spaces on one free quota',
-      maxSeconds: 5,
+      model: 'Wan 2.2 14B + Lightning + LTX-Video · 5 Spaces on one free quota',
+      maxSeconds: 8,
       requires: {
         env: 'HUGGING_FACE_TOKEN',
         signupUrl: 'https://huggingface.co/settings/tokens',
@@ -199,10 +234,10 @@ async function runPool(
   if (ready.length === 0) {
     const soonest = Math.min(...ordered.map((spec) => healthOf(spec.space).cooldownUntil || now));
     const seconds = Math.max(1, Math.ceil((soonest - now) / 1000));
-    throw new ProviderError(`All 4 Hugging Face Spaces are cooling down (next in ${seconds}s)`, {
-      retryable: true,
-      status: 429,
-    });
+    throw new ProviderError(
+      `All ${SPACES.length} Hugging Face Spaces are cooling down (next in ${seconds}s)`,
+      { retryable: true, status: 429 },
+    );
   }
 
   const errors: string[] = [];
@@ -224,9 +259,10 @@ async function runPool(
     }
   }
 
-  throw new ProviderError(`All 4 Hugging Face Spaces declined — ${errors.join(' | ')}`, {
-    retryable: true,
-  });
+  throw new ProviderError(
+    `All ${SPACES.length} Hugging Face Spaces declined — ${errors.join(' | ')}`,
+    { retryable: true },
+  );
 }
 
 async function runSpace(

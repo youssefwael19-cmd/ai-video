@@ -3,6 +3,7 @@ import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import ffmpegStatic from 'ffmpeg-static';
 import { config } from './config.js';
+import type { BeatKind } from './prompt.js';
 import type { Aspect } from './providers/types.js';
 
 const ffmpegBin = ffmpegStatic ?? 'ffmpeg';
@@ -159,6 +160,11 @@ export async function composeSegments({ segments, aspect, outputPath }: ComposeI
     // unsharp pass only on beats that really are being enlarged puts back some
     // of the detail the model's low-resolution render averaged away.
     const enlarging = info.width > 0 && (info.width < width || info.height < height);
+    // A provider clip and a locally animated still start out looking nothing
+    // alike: the clips are flat and slightly soft, the still is crisp and
+    // untouched. This one grade runs on every beat so the finished video reads
+    // as a single piece of footage rather than a patchwork.
+    const grade = ',eq=contrast=1.04:saturation=1.06';
     const sharpen = enlarging ? ',unsharp=5:5:0.7:5:5:0' : '';
     // Fade only at the ends of the finished video: a fade on every beat dipped
     // the whole thing to black three times in fifteen seconds.
@@ -173,7 +179,7 @@ export async function composeSegments({ segments, aspect, outputPath }: ComposeI
     // 25fps conversion is done by the encoder's `-r` instead.
     const filter =
       `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height}` +
-      `${sharpen},tpad=stop_mode=clone:stop_duration=${BEAT_SECONDS},` +
+      `${grade}${sharpen},tpad=stop_mode=clone:stop_duration=${BEAT_SECONDS},` +
       `trim=duration=${BEAT_SECONDS},setpts=PTS-STARTPTS,setsar=1${fadeIn}${fadeOut}[v]`;
 
     await run([
@@ -230,12 +236,37 @@ export async function composeSegments({ segments, aspect, outputPath }: ComposeI
   return TOTAL_SECONDS;
 }
 
-/** Per-beat motion moves shared by the fallback renderers. */
-const localMotion = (frames: number): string[] => [
-  `zoompan=z='1.02+0.0016*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`,
-  `zoompan=z='1.22':x='(iw-iw/zoom)*(on/${frames})':y='(ih-ih/zoom)*0.4'`,
-  `zoompan=z='1.34-0.0018*on':x='iw/2-(iw/zoom/2)':y='(ih-ih/zoom)*(1-on/${frames})'`,
-];
+/**
+ * Framing for each kind of shot when there is no AI clip to use. The point of
+ * these numbers is that the four beats do not look like the same photograph
+ * pushed around four times: one pushes in from the full frame, one is a macro
+ * crop that drifts across the surface, one pulls back from close in. A beat
+ * starting at 1.75 is showing roughly a third of the frame, which reads as a
+ * real detail shot next to a full-frame beat.
+ */
+const MOVES: Record<BeatKind, { from: number; to: number; pan: 'center' | 'across' }> = {
+  hero: { from: 1, to: 1.1, pan: 'center' },
+  detail: { from: 1.75, to: 1.5, pan: 'across' },
+  rotation: { from: 1.14, to: 1, pan: 'across' },
+  reveal: { from: 1.32, to: 1, pan: 'center' },
+};
+
+/**
+ * Ease-out so the move settles instead of stopping dead. `on` is the output
+ * frame number; zoompan reads z/x/y per frame, and the quotes keep the commas
+ * inside min()/pow() from being read as filter separators.
+ */
+function zoomPan(kind: BeatKind, frames: number): string {
+  const move = MOVES[kind] ?? MOVES.hero;
+  const last = Math.max(1, frames - 1);
+  const ease = `(1-pow(1-min(on/${last},1),2))`;
+  const zoom = `${move.from}+(${move.to}-${move.from})*${ease}`;
+  const x =
+    move.pan === 'center' ? 'iw/2-(iw/zoom/2)' : `(iw-iw/zoom)*(0.12+0.76*${ease})`;
+  const y =
+    move.pan === 'center' ? 'ih/2-(ih/zoom/2)' : `(ih-ih/zoom)*(0.35+0.3*${ease})`;
+  return `zoompan=z='${zoom}':x='${x}':y='${y}'`;
+}
 
 /**
  * One 5s Ken Burns beat over the product photo. Used to fill a single beat that
@@ -245,20 +276,21 @@ const localMotion = (frames: number): string[] => [
 export async function renderLocalSegment({
   imagePath,
   aspect,
-  index,
+  kind,
   outputPath,
 }: {
   imagePath: string;
   aspect: Aspect;
-  index: number;
+  kind: BeatKind;
   outputPath: string;
 }): Promise<number> {
   const { width, height } = sizeFor(aspect);
+  // Animating on a 2x canvas and sampling down keeps the move sub-pixel smooth;
+  // zooming the delivered size directly visibly steps from frame to frame.
   const w2 = width * 2;
   const h2 = height * 2;
   const frames = BEAT_SECONDS * FPS;
-  const moves = localMotion(frames);
-  const move = moves[index % moves.length];
+  const move = zoomPan(kind, frames);
 
   // d=1: the looped still already supplies one input frame per output frame, so
   // letting zoompan emit `frames` frames per input would finish the move early
@@ -304,30 +336,6 @@ export async function renderLocalSegment({
   return BEAT_SECONDS;
 }
 
-/** Smart local fallback: picks motion based on aspect and beat index for variety. */
-const smartLocalMotion = (aspect: Aspect, index: number): string[] => {
-  // Add variety per beat index - different starting positions and speeds
-  if (aspect === '9:16') {
-    if (index === 0) {
-      return [
-        `zoompan=z='1.02+0.0016*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`,
-        `zoompan=z='1.15+0.0012*on':x='iw/4-(iw/zoom/4)':y='ih/4-(ih/zoom/4)'`,
-        `zoompan=z='1.28-0.0018*on':x='3iw/4-(3iw/zoom/2)':y='3ih/4-(3ih/zoom/2)'`,
-      ];
-    } else if (index === 1) {
-      return [
-        `zoompan=z='1.02+0.0016*on':x='3iw/4-(3iw/zoom/2)':y='3ih/4-(3ih/zoom/2)'`,
-        `zoompan=z='1.15+0.0012*on':x='iw/4-(iw/zoom/4)':y='ih/4-(ih/zoom/4)'`,
-        `zoompan=z='1.28-0.0018*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`,
-      ];
-    }
-  }
-  // Default fallback - same as before for other aspects
-  return localMotion(BEAT_SECONDS * FPS);
-};
-
-
-export function renderPath
-(jobId: string): string {
+export function renderPath(jobId: string): string {
   return path.join(config.renderDir, `${jobId}.mp4`);
 }

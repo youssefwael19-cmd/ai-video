@@ -34,7 +34,7 @@ export const KEY_SLOTS: KeySlot[] = [
     label: 'Hugging Face token',
     service: 'Hugging Face Spaces',
     signupUrl: 'https://huggingface.co/settings/tokens',
-    note: 'Optional — the four Spaces already render anonymously on a shared daily GPU quota. A token moves the runs onto your own quota.',
+    note: 'Optional — the five Spaces already render anonymously on a shared daily GPU quota. A token moves the runs onto your own quota.',
   },
   {
     field: 'novita',
