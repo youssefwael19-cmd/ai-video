@@ -186,16 +186,16 @@ export async function composeSegments({
   // single filtergraph holding three inputs needed ~350 MiB and was OOM-killed.
   for (let index = 0; index < segments.length; index += 1) {
     const info = infos[index];
-    // Lanczos holds more edge contrast than the default scaler, and a mild
-    // unsharp pass only on beats that really are being enlarged puts back some
-    // of the detail the model's low-resolution render averaged away.
-    const enlarging = info.width > 0 && (info.width < width || info.height < height);
+    // Lanczos holds more edge contrast than the default scaler, and the sharpen
+    // pass now runs on every beat rather than only on enlarged ones: free-model
+    // clips are soft even at native size, and a local motion beat is a crop of a
+    // still photo, so both need the same edge recovery.
+    //
     // A provider clip and a locally animated still start out looking nothing
     // alike: the clips are flat and slightly soft, the still is crisp and
     // untouched. This one grade runs on every beat so the finished video reads
     // as a single piece of footage rather than a patchwork.
-    const grade = ',eq=contrast=1.04:saturation=1.06';
-    const sharpen = enlarging ? ',unsharp=5:5:0.7:5:5:0' : '';
+    const grade = ',eq=contrast=1.04:saturation=1.06,unsharp=5:5:0.7:5:5:0';
     // Fade only at the ends of the finished video: a fade on every beat dipped
     // the whole thing to black three times in fifteen seconds.
     const fadeIn = index === 0 ? ',fade=t=in:st=0:d=0.4' : '';
@@ -218,7 +218,7 @@ export async function composeSegments({
     // trimming by duration let those land on 4.96s and leave the video at 14.92s.
     const filter =
       `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height}` +
-      `${grade}${sharpen},tpad=stop_mode=clone:stop_duration=${BEAT_SECONDS},` +
+      `${grade},tpad=stop_mode=clone:stop_duration=${BEAT_SECONDS},` +
       `fps=${FPS},trim=end_frame=${BEAT_SECONDS * FPS},setpts=N/(${FPS}*TB),setsar=1${framing}${fadeIn}${fadeOut}[v]`;
 
     await run([
@@ -234,8 +234,12 @@ export async function composeSegments({
       'libx264',
       '-preset',
       'veryfast',
+      // 16 instead of 18: this is the encode that ends up in the delivered
+      // file, so it is the one CRF that changes what the viewer sees. The local
+      // beats have already been encoded once, and a second lossy pass on top of
+      // that was stacking compression loss on the camera move.
       '-crf',
-      '18',
+      '16',
       '-pix_fmt',
       'yuv420p',
       '-r',
@@ -279,15 +283,20 @@ export async function composeSegments({
  * Framing for each kind of shot when there is no AI clip to use. The point of
  * these numbers is that the four beats do not look like the same photograph
  * pushed around four times: one pushes in from the full frame, one is a macro
- * crop that drifts across the surface, one pulls back from close in. A beat
- * starting at 1.75 is showing roughly a third of the frame, which reads as a
- * real detail shot next to a full-frame beat.
+ * crop that drifts across the surface, one pulls back from close in.
+ *
+ * The zoom values are deliberately modest. A product photo is often under
+ * 1000px on its long edge, so every extra 0.1 of zoom stretches real pixels
+ * further: the old detail beat started at 1.75, which enlarged the source by
+ * roughly 1.9x and read as mush on a phone. 1.5 still shows about two thirds
+ * of the frame and still cuts as a macro next to the full-frame push-in, but
+ * it keeps far more of the photo's real detail.
  */
 const MOVES: Record<BeatKind, { from: number; to: number; pan: 'center' | 'across' }> = {
   hero: { from: 1, to: 1.1, pan: 'center' },
-  detail: { from: 1.75, to: 1.5, pan: 'across' },
+  detail: { from: 1.5, to: 1.32, pan: 'across' },
   rotation: { from: 1.14, to: 1, pan: 'across' },
-  reveal: { from: 1.32, to: 1, pan: 'center' },
+  reveal: { from: 1.24, to: 1, pan: 'center' },
 };
 
 /**
@@ -380,7 +389,7 @@ export async function renderLocalSegment({
     '-preset',
     'veryfast',
     '-crf',
-    '18',
+    '16',
     '-pix_fmt',
     'yuv420p',
     '-r',
