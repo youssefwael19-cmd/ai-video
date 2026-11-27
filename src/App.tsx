@@ -414,7 +414,7 @@ export default function App() {
                         : segment.status === 'fallback'
                           ? 'local motion pass'
                           : segment.status === 'failed'
-                            ? 'all providers declined'
+                            ? `all providers declined after ${segment.attempts} attempt${segment.attempts === 1 ? '' : 's'}`
                             : 'queued'}
                     </span>
                   </div>

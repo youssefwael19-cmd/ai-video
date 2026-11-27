@@ -298,10 +298,10 @@ const MOVES: Record<BeatKind, { from: number; to: number; pan: 'center' | 'acros
  * back something close to the reference framing.
  */
 const FINISHING: Record<BeatKind, { from: number; to: number; pan: 'center' | 'across' | 'rise' }> = {
-  hero: { from: 1, to: 1.05, pan: 'center' },
-  detail: { from: 1.14, to: 1.2, pan: 'across' },
-  rotation: { from: 1.1, to: 1.1, pan: 'rise' },
-  reveal: { from: 1.06, to: 1, pan: 'center' },
+  hero: { from: 1, to: 1.01, pan: 'center' },
+  detail: { from: 1.01, to: 1.02, pan: 'across' },
+  rotation: { from: 1.01, to: 1.01, pan: 'rise' },
+  reveal: { from: 1.01, to: 1, pan: 'center' },
 };
 
 interface Move {
