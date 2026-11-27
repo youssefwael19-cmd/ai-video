@@ -327,10 +327,16 @@ async function runSpace(
   const { event_id: eventId } = (await callRes.json()) as { event_id?: string };
   if (!eventId) throw new ProviderError('Space did not return a job id');
 
-  // 3. Read the SSE stream until the job finishes.
+  // 3. Read the SSE stream until the job finishes. A Space that accepts the run
+  // and then sits in a queue behind other users sends progress events forever,
+  // and this read had no cap: one queued Space held a whole beat for the full
+  // 9-minute provider deadline, which the app showed as a render that never
+  // moved. LTX answers in ~30s and the Wan builds in ~60s, so a Space still
+  // talking after 200s has handed the beat to the next one instead.
+  const streamSignal = withDeadline(signal, 200_000);
   const streamRes = await fetch(`https://${host}/gradio_api/call/${spec.apiName}/${eventId}`, {
     headers,
-    signal,
+    signal: streamSignal,
   });
   if (!streamRes.ok || !streamRes.body) {
     throw new ProviderError(`Space stream failed (HTTP ${streamRes.status})`, {
@@ -342,6 +348,7 @@ async function runSpace(
   const payload = await readSse(
     streamRes.body,
     hfToken ? '' : ' (anonymous — shared daily GPU quota; add HUGGING_FACE_TOKEN for your own)',
+    streamSignal,
   );
   const remote = findVideoPath(payload);
   if (!remote) {
@@ -358,14 +365,29 @@ async function runSpace(
   return { videoPath: dest };
 }
 
-async function readSse(body: ReadableStream<Uint8Array>, tokenNote = ''): Promise<unknown> {
+async function readSse(
+  body: ReadableStream<Uint8Array>,
+  tokenNote = '',
+  signal?: AbortSignal,
+): Promise<unknown> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let last: unknown = null;
+  // Cancelling the read is what actually stops the wait: aborting the fetch
+  // alone leaves a queued Space streaming into a reader nobody finishes.
+  const stop = () => void reader.cancel().catch(() => {});
+  signal?.addEventListener('abort', stop, { once: true });
 
   while (true) {
-    const { done, value } = await reader.read();
+    let chunk: ReadableStreamReadResult<Uint8Array>;
+    try {
+      chunk = await reader.read();
+    } catch (err) {
+      if (signal?.aborted) break;
+      throw err;
+    }
+    const { done, value } = chunk;
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
 
@@ -400,6 +422,13 @@ async function readSse(body: ReadableStream<Uint8Array>, tokenNote = ''): Promis
       if (event === 'complete') return parsed;
       if (event === 'generating' || event === 'data') last = parsed;
     }
+  }
+  signal?.removeEventListener('abort', stop);
+  if (signal?.aborted) {
+    throw new ProviderError(`Space did not finish rendering in time${tokenNote}`, {
+      retryable: true,
+      status: 504,
+    });
   }
   if (last) return last;
   throw new ProviderError('Space stream ended without a result');
