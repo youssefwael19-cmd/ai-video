@@ -173,14 +173,16 @@ export async function composeSegments({ segments, aspect, outputPath }: ComposeI
       index === segments.length - 1 ? `,fade=t=out:st=${BEAT_SECONDS - 0.4}:d=0.4` : '';
     const beatPath = path.join(workDir, `${path.basename(outputPath, '.mp4')}-beat${index}.mp4`);
     // A short clip holds its last frame for the rest of its slot: tpad clones it
-    // and the trim keeps exactly 5s, so nothing is slowed down to fill the slot.
-    // Neither `fps` nor `setpts` may run before tpad — either one silently stops
-    // it padding, which is how a 3s beat once shortened the video to 13s. The
-    // 25fps conversion is done by the encoder's `-r` instead.
+    // so nothing is slowed down to fill the slot. Neither `fps` nor `setpts` may
+    // run before tpad — either one silently stops it padding, which is how a 3s
+    // beat once shortened the video to 13s. So the padding comes first, then the
+    // beat is normalised to 25fps and cut to exactly 125 frames: providers ship
+    // 24fps clips, clips with a start offset and clips a few frames short, and
+    // trimming by duration let those land on 4.96s and leave the video at 14.92s.
     const filter =
       `[0:v]scale=${width}:${height}:force_original_aspect_ratio=increase:flags=lanczos,crop=${width}:${height}` +
       `${grade}${sharpen},tpad=stop_mode=clone:stop_duration=${BEAT_SECONDS},` +
-      `trim=duration=${BEAT_SECONDS},setpts=PTS-STARTPTS,setsar=1${fadeIn}${fadeOut}[v]`;
+      `fps=${FPS},trim=end_frame=${BEAT_SECONDS * FPS},setpts=N/(${FPS}*TB),setsar=1${fadeIn}${fadeOut}[v]`;
 
     await run([
       '-y',
@@ -299,7 +301,7 @@ export async function renderLocalSegment({
   const filter =
     `[0:v]scale=${w2}:${h2}:force_original_aspect_ratio=increase:flags=lanczos,crop=${w2}:${h2},` +
     `${move}:d=1:s=${width}x${height}:fps=${FPS},` +
-    `trim=duration=${BEAT_SECONDS},setpts=PTS-STARTPTS[v]`;
+    `trim=end_frame=${frames},setpts=N/(${FPS}*TB)[v]`;
 
   await run([
     '-y',

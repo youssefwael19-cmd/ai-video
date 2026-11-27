@@ -34,12 +34,42 @@ const filedata = (p: string): FileData => ({ path: p, meta: { _type: 'gradio.Fil
 const NEGATIVE = 'blurry, distorted product shape, warped logo, extra limbs, watermark, flickering, text artifacts';
 
 /**
- * Ordered by output quality, because the first Space that answers wins the
- * beat. The 14B Wan checkpoint resolves fine surface detail (edges, embossing,
- * label type) that the fp8 and Lightning builds soften, so it gets first pick
- * and the faster builds are there to keep a beat alive when it is queued out.
+ * Ordered by delivered resolution, because the first Space that answers wins the
+ * beat and the finished video is 720x1280. LTX is the only Space here that can
+ * be told a size, and it renders portrait natively at 704x1216 (~2x the pixels
+ * of the 480x832 the Wan builds return); upscaling 480p left the free path
+ * visibly softer than the Atmee beats beside it. The Wan builds stay behind it
+ * to keep a beat alive when LTX is queued out or asleep.
  */
 const SPACES: SpaceSpec[] = [
+  {
+    space: 'Lightricks/ltx-video-distilled',
+    apiName: 'image_to_video',
+    model: 'LTX-Video distilled',
+    maxSeconds: 8,
+    buildInputs: (req, image, seconds) => {
+      const portrait = req.aspect === '9:16';
+      const landscape = req.aspect === '16:9';
+      const width = portrait ? 704 : landscape ? 1216 : 960;
+      const height = portrait ? 1216 : landscape ? 704 : 960;
+      const frames = Math.round(seconds * 24) + 1;
+      return [
+        req.prompt,
+        NEGATIVE,
+        image,
+        '',
+        height,
+        width,
+        'image-to-video',
+        seconds,
+        Math.min(257, Math.max(9, frames)),
+        req.seed,
+        false,
+        1,
+        false,
+      ];
+    },
+  },
   {
     space: 'Upsampler/wan-2-2-14b-image-to-video',
     apiName: 'generate_video',
@@ -121,34 +151,6 @@ const SPACES: SpaceSpec[] = [
       req.seed,
       false,
     ],
-  },
-  {
-    space: 'Lightricks/ltx-video-distilled',
-    apiName: 'image_to_video',
-    model: 'LTX-Video distilled',
-    maxSeconds: 8,
-    buildInputs: (req, image, seconds) => {
-      const portrait = req.aspect === '9:16';
-      const landscape = req.aspect === '16:9';
-      const width = portrait ? 704 : landscape ? 1216 : 960;
-      const height = portrait ? 1216 : landscape ? 704 : 960;
-      const frames = Math.round(seconds * 24) + 1;
-      return [
-        req.prompt,
-        NEGATIVE,
-        image,
-        '',
-        height,
-        width,
-        'image-to-video',
-        seconds,
-        Math.min(257, Math.max(9, frames)),
-        req.seed,
-        false,
-        1,
-        false,
-      ];
-    },
   },
 ];
 

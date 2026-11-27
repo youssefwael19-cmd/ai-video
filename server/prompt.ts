@@ -19,7 +19,7 @@ export interface BeatPlan {
 
 export const BEAUTY = {
   negative:
-    'warped product shape, melted text, distorted logo, extra objects, hands, watermark, subtitles, flickering, low quality, blurry, camera shake, morphing product, duplicate product, cuts, scene change',
+    'warped product shape, melted text, distorted logo, invented label, added lettering, changed glass colour, extra objects, hands, watermark, subtitles, flickering, low quality, blurry, camera shake, morphing product, duplicate product, cuts, scene change',
 };
 
 /**
@@ -46,7 +46,7 @@ const BEATS: BeatPlan[] = [
   },
   {
     kind: 'detail',
-    label: 'Light sweep',
+    label: 'Texture detail',
     // A macro fly-around makes these models rebuild the product from the wrong
     // side, which bends the silhouette and melts the label. Moving the light
     // instead reveals the same material detail without inventing any geometry.
@@ -55,9 +55,13 @@ const BEATS: BeatPlan[] = [
   },
   {
     kind: 'rotation',
-    label: 'Slight turn',
+    label: 'Cap highlight',
+    // Even a few degrees of turn asks the model for a side it has never seen:
+    // the black bottle came back amber, carrying a white label that was not on
+    // the photo. Raking light across the cap reads as another view without
+    // handing the model anything to invent.
     motion:
-      'the product turns just a few degrees on its base while a soft highlight sweeps across the front of it, the background and lighting stay unchanged',
+      'a highlight rakes slowly across the cap and the front face of the product, revealing the material finish, while the product keeps exactly the same front view',
   },
   {
     kind: 'reveal',
@@ -116,7 +120,12 @@ export function buildBeatPrompt(beat: BeatPlan, brief: string, style: StylePrese
     `${beat.motion}.`,
     subject,
     `${STYLE_LOOK[style]}.`,
-    'The product stays identical to the reference photo — same silhouette, colour, label, texture and proportions — and never turns around, unfolds or changes shape.',
+    // Do not name the label, its wording or any text here. Asking these models
+    // to "keep the label identical" is read as "render a label", and every free
+    // model answered by painting fresh lettering onto the product. Plain
+    // "do not move" language holds the shape far better.
+    'The product keeps exactly the same framing, silhouette, colour and proportions as the reference photo. It does not move, turn, open or change shape at any point.',
+    'Keep the background and the shadows as they are in the reference photo.',
     'The camera movement is slow and small, one continuous shot, photorealistic, crisp sharp focus, high detail.',
   ]
     .filter(Boolean)
