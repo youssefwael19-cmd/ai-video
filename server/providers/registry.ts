@@ -8,19 +8,19 @@ import { createReplicateProviders } from './replicate.js';
 import type { Provider } from './types.js';
 
 /**
- * Every free provider the app knows about, in quality-first order. Unconfigured
- * providers are skipped, but Hugging Face Spaces needs no key at all, so this
- * pool is never empty.
+ * Free providers ordered by quality-to-cost ratio. The pool is never empty
+ * because Hugging Face Spaces needs no key. Prioritize Atmee for best results
+ * when credits are available, then Novita/Magic Hour as fallbacks.
  */
 export function buildProviderPool(): Provider[] {
   return [
-    ...createHuggingFaceProviders(config.keys.huggingFace),
+    ...createAtmeeProviders(config.keys.atmee),
     ...createNovitaProviders(config.keys.novita),
     ...createMagicHourProviders(config.keys.magicHour),
     // Each of the three below draws on its own separate free allowance, so a
     // spent quota on one cannot refuse the beats that a healthy one can render.
     ...createReplicateProviders(config.keys.replicate),
     ...createAgnesProviders(config.keys.agnes),
-    ...createAtmeeProviders(config.keys.atmee),
+    ...createHuggingFaceProviders(config.keys.huggingFace),
   ];
 }

@@ -304,8 +304,30 @@ export async function renderLocalSegment({
   return BEAT_SECONDS;
 }
 
+/** Smart local fallback: picks motion based on aspect and beat index for variety. */
+const smartLocalMotion = (aspect: Aspect, index: number): string[] => {
+  // Add variety per beat index - different starting positions and speeds
+  if (aspect === '9:16') {
+    if (index === 0) {
+      return [
+        `zoompan=z='1.02+0.0016*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`,
+        `zoompan=z='1.15+0.0012*on':x='iw/4-(iw/zoom/4)':y='ih/4-(ih/zoom/4)'`,
+        `zoompan=z='1.28-0.0018*on':x='3iw/4-(3iw/zoom/2)':y='3ih/4-(3ih/zoom/2)'`,
+      ];
+    } else if (index === 1) {
+      return [
+        `zoompan=z='1.02+0.0016*on':x='3iw/4-(3iw/zoom/2)':y='3ih/4-(3ih/zoom/2)'`,
+        `zoompan=z='1.15+0.0012*on':x='iw/4-(iw/zoom/4)':y='ih/4-(ih/zoom/4)'`,
+        `zoompan=z='1.28-0.0018*on':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`,
+      ];
+    }
+  }
+  // Default fallback - same as before for other aspects
+  return localMotion(BEAT_SECONDS * FPS);
+};
 
 
-export function renderPath(jobId: string): string {
+export function renderPath
+(jobId: string): string {
   return path.join(config.renderDir, `${jobId}.mp4`);
 }
