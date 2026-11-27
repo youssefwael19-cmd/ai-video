@@ -44,7 +44,9 @@ async function run(apiKey: string, req: MotionRequest, signal: AbortSignal) {
       seconds: String(seconds),
       mode: 'keyframe',
       size: '720P',
-      aspect_ratio: req.aspect,
+      // Keyframe mode refuses aspect_ratio ("output follows the input image"),
+      // so the photo's own shape decides the frame and compose crops it to the
+      // requested aspect. Sending it got every Agnes beat rejected with a 400.
       first_frame: imageUrl,
       seed: req.seed,
     }),

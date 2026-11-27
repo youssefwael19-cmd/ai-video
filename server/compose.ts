@@ -201,12 +201,12 @@ export async function composeSegments({
     const fadeIn = index === 0 ? ',fade=t=in:st=0:d=0.4' : '';
     const fadeOut =
       index === segments.length - 1 ? `,fade=t=out:st=${BEAT_SECONDS - 0.4}:d=0.4` : '';
-    // The framing move runs after the clip is normalised to 25 fps, so `on`
-    // counts the beats' own frames instead of the provider's 24 fps ones.
-    const clipFrames = Math.max(1, Math.min(BEAT_SECONDS * FPS, Math.round(info.seconds * FPS) || BEAT_SECONDS * FPS));
+    // The framing move runs after the clip is padded, retimed to 25 fps and cut
+    // to 125 frames, so every beat — a 3s clip or a 6s one — walks the same
+    // 125-frame move instead of finishing early on a short clip.
     const kind = kinds?.[index] ?? null;
     const framing = kind
-      ? `,${zoomPan(FINISHING[kind] ?? FINISHING.hero, clipFrames, `${width}x${height}`)}`
+      ? `,${zoomPan(FINISHING[kind] ?? FINISHING.hero, BEAT_SECONDS * FPS, `${width}x${height}`)}`
       : '';
     const beatPath = path.join(workDir, `${path.basename(outputPath, '.mp4')}-beat${index}.mp4`);
     // A short clip holds its last frame for the rest of its slot: tpad clones it
